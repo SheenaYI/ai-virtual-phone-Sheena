@@ -11,8 +11,9 @@ import {
 import type { ApiConfig, PresetConfig, RegexConfig, WorldBookConfig } from "./settings-types";
 import { assemblePromptPayload, type LLMMessage } from "./llm-prompt-assembler";
 import { previewMessagesForApi, sendLLMRequest, ChatEngineError } from "./chat-engine";
-import { loadMemoryConfig } from "./memory-storage";
+import { loadMemoryConfig, incrementEventCounter } from "./memory-storage";
 import { retrieveCoreMemoriesForPrompt, retrieveMemoriesForPrompt } from "./memory-service";
+import { maybeRunSummarization } from "./memory-summarizer";
 import { formatCoreMemories, formatLongTermMemories } from "./memory-injector";
 import { prepareShortTermContext } from "./short-term-assembler";
 import { buildCalendarScheduleMarker, getCurrentCalendarScheduleForPrompt } from "./calendar-storage";
@@ -161,6 +162,19 @@ export async function generateStoryCompletion(
     macroEngine,
     activeTags: ["story"],
   });
+
+  // Memory: increment event counter + check if summarization needed (non-blocking).
+  // Mirrors the chat engine so story turns also drive long-term memory summarization.
+  (async () => {
+    try {
+      incrementEventCounter(characterId); // story user turn
+      incrementEventCounter(characterId); // story AI reply
+      await maybeRunSummarization(characterId, character.name);
+    } catch (err) {
+      console.warn("[StoryEngine] Memory counter/summarization failed:", err);
+    }
+  })();
+
   return {
     rawText: parsed.rawText,
     renderedText: parsed.renderedText,
