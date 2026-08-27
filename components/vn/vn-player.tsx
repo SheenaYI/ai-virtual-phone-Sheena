@@ -18,9 +18,10 @@ import {
   updateChapterBeats,
   setActiveBeatIndex,
   loadVnConfig,
+  updateChapterSummary,
 } from "@/lib/vn-storage";
 import type { VnFrameAudio, VnMessage } from "@/lib/vn-types";
-import { generateVnCompletion } from "@/lib/vn-engine";
+import { generateVnCompletion, summarizeVnChapter } from "@/lib/vn-engine";
 import { parseVnResponse, packageUserInput, packageMultiActions } from "@/lib/vn-parser";
 import { resolveVnAssetMap, loadVnScenes, getVnSceneLayout, getVnSpriteLayout } from "@/lib/vn-asset-storage";
 import { resolveUserIdentity } from "@/lib/settings-storage";
@@ -1328,6 +1329,18 @@ export function VnPlayer({ characterId, chapterIndex, onClose, onChapterEnd, vnT
                 onClick={async () => {
                   setIsArchiving(true);
                   archiveChapter(session.id, chapterIndex);
+                  // 归档后自动生成章节总结（后台执行，不阻塞归档流程）
+                  const chapterMessages = loadVnMessagesForChapter(session.id, chapterIndex);
+                  void (async () => {
+                    try {
+                      if (chapterMessages.length === 0) return;
+                      const summary = await summarizeVnChapter(characterId, chapterMessages);
+                      updateChapterSummary(session.id, chapterIndex, summary);
+                    } catch (err) {
+                      // 总结失败不影响归档；章节页的书本按钮仍可手动补总结
+                      console.warn("[VN] Auto chapter summarization failed:", err);
+                    }
+                  })();
                   // Small delay so the user sees the archiving state
                   await new Promise((r) => setTimeout(r, 600));
                   setIsArchiving(false);
