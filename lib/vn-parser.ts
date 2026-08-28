@@ -31,9 +31,15 @@ export function parseVnResponse(rawText: string): VnParsedResponse {
   // Strip <think>/<thinking> blocks (model reasoning leakage)
   const trimmed = rawText.trim().replace(/<(?:think|thinking)>[\s\S]*?<\/(?:think|thinking)>/gi, "").trim();
 
+  // Extract optional <summary> (per-turn progress note) before content parsing
+  const summaryMatch = trimmed.match(/<summary>([\s\S]*?)<\/summary>/i);
+  const summaryText = summaryMatch ? summaryMatch[1].trim() : "";
+  // Remove summary block so it never leaks into scene/narration rendering
+  const contentSource = trimmed.replace(/<summary>[\s\S]*?<\/summary>/gi, "").trim();
+
   // Extract <content>...</content> or use full text
-  const contentMatch = trimmed.match(/<content>([\s\S]*?)<\/content>/i);
-  const body = contentMatch ? contentMatch[1].trim() : trimmed;
+  const contentMatch = contentSource.match(/<content>([\s\S]*?)<\/content>/i);
+  const body = contentMatch ? contentMatch[1].trim() : contentSource;
 
 
   // Parse all <scene> tags
@@ -112,7 +118,7 @@ export function parseVnResponse(rawText: string): VnParsedResponse {
     }
   }
 
-  return { frames, options, rawText: trimmed };
+  return { frames, options, rawText: trimmed, summaryText };
 }
 
 /**

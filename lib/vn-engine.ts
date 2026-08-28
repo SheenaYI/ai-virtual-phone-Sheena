@@ -36,6 +36,7 @@ export type VnGenerationResult = {
   promptMessages: LLMMessage[];
   model: string;
   presetName: string;
+  summaryText: string;
 };
 
 function buildVnBilingualInstruction(enabled: boolean, customPrompt?: string): string {
@@ -125,6 +126,7 @@ export async function generateVnCompletion(
     promptMessages: llmMessages,
     model: apiConfig.defaultModel,
     presetName: preset?.name || "默认预设",
+    summaryText: parsed.summaryText,
   };
 }
 

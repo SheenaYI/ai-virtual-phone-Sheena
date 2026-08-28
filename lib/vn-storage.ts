@@ -388,6 +388,24 @@ export function loadVnProjectionEntries(
     });
   }
 
+  // 每轮消息的 roundSummary 直接投影：漫卷生成时模型输出的 <summary> 存进
+  // VnMessage.roundSummary，随剧情实时进入短期记忆，无需归档或等阈值。
+  const messageProjections = _messagesCache
+    .filter((m) => m.sessionId === session.id && m.role === "assistant" && m.roundSummary)
+    .map((m) => {
+      const snippet = compactText(m.roundSummary!, 160);
+      if (!snippet) return null;
+      const formattedTs = formatChatTimestamp(m.createdAt);
+      return {
+        id: `vn_round_${m.id}`,
+        timestamp: m.createdAt,
+        content: `[事件 ${formattedTs}] ${snippet}`,
+      } as VnProjectionEntry;
+    })
+    .filter((p): p is VnProjectionEntry => Boolean(p))
+    .filter((p) => !options?.afterTimestamp || p.timestamp > options.afterTimestamp);
+  projections.push(...messageProjections);
+
   return projections;
 }
 

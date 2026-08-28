@@ -16,6 +16,7 @@ export type VnParsedResponse = {
   frames: VnFrame[];
   options: VnOptions | null;
   rawText: string;
+  summaryText: string;
 };
 
 export type VnBeat = {
@@ -61,6 +62,7 @@ export type VnMessage = {
   chapterIndex: number;
   createdAt: string;
   frameAudio?: Record<number, VnFrameAudio>;
+  roundSummary?: string;
 };
 
 export type VnFrameAudio = {

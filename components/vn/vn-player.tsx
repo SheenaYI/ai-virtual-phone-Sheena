@@ -26,7 +26,7 @@ import { parseVnResponse, packageUserInput, packageMultiActions } from "@/lib/vn
 import { resolveVnAssetMap, loadVnScenes, getVnSceneLayout, getVnSpriteLayout } from "@/lib/vn-asset-storage";
 import { resolveUserIdentity } from "@/lib/settings-storage";
 import { loadCharacters } from "@/lib/character-storage";
-import { getEventCounter, incrementEventCounter, loadMemoryConfig } from "@/lib/memory-storage";
+import { incrementEventCounter } from "@/lib/memory-storage";
 import { maybeRunSummarization } from "@/lib/memory-summarizer";
 import type { VnFrame, VnOptions, VnBeat } from "@/lib/vn-types";
 import { splitBilingualText } from "@/lib/bilingual-text";
@@ -530,35 +530,18 @@ export function VnPlayer({ characterId, chapterIndex, onClose, onChapterEnd, vnT
     return () => { if (autoRef.current) clearTimeout(autoRef.current); };
   }, [autoMode, isTyping, showArchiveConfirm, waitingForInput, advance]);
 
-  // ── 漫卷自动记忆：每轮计数；达到阈值时滚动总结当前章节，并触发统一长期总结 ──
-  // 与剧情模式 UI 层同款逻辑；滚动总结把章节总结写进 summaryContent，
-  // 未归档章节的总结也会经 loadVnProjectionEntries 投影进短期记忆时间线。
+  // ── 漫卷自动记忆：每轮计数并触发统一长期总结。每轮的 <summary> 已经
+  // roundSummary 字段实时投影进短期记忆，不依赖归档或阈值。──
   const afterVnGeneration = useCallback(async (charId: string) => {
     try {
       incrementEventCounter(charId);
       incrementEventCounter(charId);
-      const memConfig = loadMemoryConfig();
-      if (getEventCounter(charId) >= memConfig.summarizationEventInterval) {
-        const latestSession = createOrGetVnSession(charId);
-        const chapter = latestSession.chapters[chapterIndex];
-        const chapterMessages = loadVnMessagesForChapter(session.id, chapterIndex);
-        const lastSummaryTs = chapter?.summaryTimestamp;
-        const newMessages = lastSummaryTs
-          ? chapterMessages.filter((m) => m.createdAt > lastSummaryTs)
-          : chapterMessages;
-        if (newMessages.length > 0) {
-          const summary = await summarizeVnChapter(charId, newMessages, {
-            previousSummary: chapter?.summaryContent,
-          });
-          updateChapterSummary(session.id, chapterIndex, summary);
-        }
-      }
       const char = loadCharacters().find((c) => c.id === charId);
       await maybeRunSummarization(charId, char?.name ?? "");
     } catch (err) {
       console.warn("[VN] Memory counter/summarization failed:", err);
     }
-  }, [session.id, chapterIndex]);
+  }, []);
 
   // ── Submit user input ──
   const handleSubmit = useCallback(async (text: string, type: "dialogue" | "narration" | "choice") => {
@@ -607,6 +590,7 @@ export function VnPlayer({ characterId, chapterIndex, onClose, onChapterEnd, vnT
         role: "assistant",
         rawContent: result.rawText,
         chapterIndex,
+        roundSummary: result.summaryText,
       });
 
       // Update start message ID if needed
@@ -730,7 +714,7 @@ export function VnPlayer({ characterId, chapterIndex, onClose, onChapterEnd, vnT
     try {
       const allMessages = loadVnMessages(session.id);
       const result = await generateVnCompletion(characterId, allMessages);
-      const aiMsg = pushVnMessage({ sessionId: session.id, role: "assistant", rawContent: result.rawText, chapterIndex });
+      const aiMsg = pushVnMessage({ sessionId: session.id, role: "assistant", rawContent: result.rawText, chapterIndex, roundSummary: result.summaryText });
       updateChapterStartMessageId(session.id, chapterIndex, userMsg.id);
 
       const aiFrames = tagFramesWithMessage(result.frames, aiMsg);
@@ -836,7 +820,7 @@ export function VnPlayer({ characterId, chapterIndex, onClose, onChapterEnd, vnT
     try {
       const allMessages = loadVnMessages(session.id);
       const result = await generateVnCompletion(characterId, allMessages);
-      const aiMsg = pushVnMessage({ sessionId: session.id, role: "assistant", rawContent: result.rawText, chapterIndex });
+      const aiMsg = pushVnMessage({ sessionId: session.id, role: "assistant", rawContent: result.rawText, chapterIndex, roundSummary: result.summaryText });
       rebuildFrames();
       // Play new AI frames
       const newMsgs = loadVnMessagesForChapter(session.id, chapterIndex);
