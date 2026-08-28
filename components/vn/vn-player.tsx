@@ -26,7 +26,7 @@ import { parseVnResponse, packageUserInput, packageMultiActions } from "@/lib/vn
 import { resolveVnAssetMap, loadVnScenes, getVnSceneLayout, getVnSpriteLayout } from "@/lib/vn-asset-storage";
 import { resolveUserIdentity } from "@/lib/settings-storage";
 import { loadCharacters } from "@/lib/character-storage";
-import { incrementEventCounter } from "@/lib/memory-storage";
+import { getEventCounter, incrementEventCounter, loadMemoryConfig } from "@/lib/memory-storage";
 import { maybeRunSummarization } from "@/lib/memory-summarizer";
 import type { VnFrame, VnOptions, VnBeat } from "@/lib/vn-types";
 import { splitBilingualText } from "@/lib/bilingual-text";
@@ -530,18 +530,36 @@ export function VnPlayer({ characterId, chapterIndex, onClose, onChapterEnd, vnT
     return () => { if (autoRef.current) clearTimeout(autoRef.current); };
   }, [autoMode, isTyping, showArchiveConfirm, waitingForInput, advance]);
 
-  // ── 漫卷自动记忆：每轮计数并触发统一长期总结。每轮的 <summary> 已经
-  // roundSummary 字段实时投影进短期记忆，不依赖归档或阈值。──
+  // ── 漫卷自动记忆（双层兜底）──
+  // ① 每轮模型输出的 <summary> 已存 roundSummary 实时投影进短期记忆（新角色正常）。
+  // ② 每 N 轮（总结间隔阈值）用记忆总结 API 对当前章节做滚动总结写进 summaryContent，
+  //    旧角色即使模型不输出 <summary>，也能靠章节总结进记忆（走章节投影）。
   const afterVnGeneration = useCallback(async (charId: string) => {
     try {
       incrementEventCounter(charId);
       incrementEventCounter(charId);
+      const memConfig = loadMemoryConfig();
+      if (getEventCounter(charId) >= memConfig.summarizationEventInterval) {
+        const latestSession = createOrGetVnSession(charId);
+        const chapter = latestSession.chapters[chapterIndex];
+        const chapterMessages = loadVnMessagesForChapter(session.id, chapterIndex);
+        const lastSummaryTs = chapter?.summaryTimestamp;
+        const newMessages = lastSummaryTs
+          ? chapterMessages.filter((m) => m.createdAt > lastSummaryTs)
+          : chapterMessages;
+        if (newMessages.length > 0) {
+          const summary = await summarizeVnChapter(charId, newMessages, {
+            previousSummary: chapter?.summaryContent,
+          });
+          updateChapterSummary(session.id, chapterIndex, summary);
+        }
+      }
       const char = loadCharacters().find((c) => c.id === charId);
       await maybeRunSummarization(charId, char?.name ?? "");
     } catch (err) {
       console.warn("[VN] Memory counter/summarization failed:", err);
     }
-  }, []);
+  }, [session.id, chapterIndex]);
 
   // ── Submit user input ──
   const handleSubmit = useCallback(async (text: string, type: "dialogue" | "narration" | "choice") => {
