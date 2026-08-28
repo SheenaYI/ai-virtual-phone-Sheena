@@ -371,7 +371,9 @@ export function loadVnProjectionEntries(
   const projections: VnProjectionEntry[] = [];
 
   for (const chapter of session.chapters) {
-    if (!chapter.archived || !chapter.summaryContent) continue;
+    // 未归档章节的滚动总结同样投影：漫卷每 N 轮自动总结会把章节总结写入
+    // summaryContent，无需等归档即可进入统一时间线参与短期/长期记忆
+    if (!chapter.summaryContent) continue;
     const ts = chapter.summaryTimestamp || session.updatedAt;
     if (options?.afterTimestamp && ts <= options.afterTimestamp) continue;
 

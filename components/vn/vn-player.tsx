@@ -25,6 +25,9 @@ import { generateVnCompletion, summarizeVnChapter } from "@/lib/vn-engine";
 import { parseVnResponse, packageUserInput, packageMultiActions } from "@/lib/vn-parser";
 import { resolveVnAssetMap, loadVnScenes, getVnSceneLayout, getVnSpriteLayout } from "@/lib/vn-asset-storage";
 import { resolveUserIdentity } from "@/lib/settings-storage";
+import { loadCharacters } from "@/lib/character-storage";
+import { getEventCounter, incrementEventCounter, loadMemoryConfig } from "@/lib/memory-storage";
+import { maybeRunSummarization } from "@/lib/memory-summarizer";
 import type { VnFrame, VnOptions, VnBeat } from "@/lib/vn-types";
 import { splitBilingualText } from "@/lib/bilingual-text";
 import { playAudioBlobViaMediaElement, resolveVoiceConfig, synthesizeSpeech, unlockAudioPlayback } from "@/lib/tts-service";
@@ -527,6 +530,36 @@ export function VnPlayer({ characterId, chapterIndex, onClose, onChapterEnd, vnT
     return () => { if (autoRef.current) clearTimeout(autoRef.current); };
   }, [autoMode, isTyping, showArchiveConfirm, waitingForInput, advance]);
 
+  // ── 漫卷自动记忆：每轮计数；达到阈值时滚动总结当前章节，并触发统一长期总结 ──
+  // 与剧情模式 UI 层同款逻辑；滚动总结把章节总结写进 summaryContent，
+  // 未归档章节的总结也会经 loadVnProjectionEntries 投影进短期记忆时间线。
+  const afterVnGeneration = useCallback(async (charId: string) => {
+    try {
+      incrementEventCounter(charId);
+      incrementEventCounter(charId);
+      const memConfig = loadMemoryConfig();
+      if (getEventCounter(charId) >= memConfig.summarizationEventInterval) {
+        const latestSession = createOrGetVnSession(charId);
+        const chapter = latestSession.chapters[chapterIndex];
+        const chapterMessages = loadVnMessagesForChapter(session.id, chapterIndex);
+        const lastSummaryTs = chapter?.summaryTimestamp;
+        const newMessages = lastSummaryTs
+          ? chapterMessages.filter((m) => m.createdAt > lastSummaryTs)
+          : chapterMessages;
+        if (newMessages.length > 0) {
+          const summary = await summarizeVnChapter(charId, newMessages, {
+            previousSummary: chapter?.summaryContent,
+          });
+          updateChapterSummary(session.id, chapterIndex, summary);
+        }
+      }
+      const char = loadCharacters().find((c) => c.id === charId);
+      await maybeRunSummarization(charId, char?.name ?? "");
+    } catch (err) {
+      console.warn("[VN] Memory counter/summarization failed:", err);
+    }
+  }, [session.id, chapterIndex]);
+
   // ── Submit user input ──
   const handleSubmit = useCallback(async (text: string, type: "dialogue" | "narration" | "choice") => {
     if (!text.trim() || isGenerating) return;
@@ -611,6 +644,8 @@ export function VnPlayer({ characterId, chapterIndex, onClose, onChapterEnd, vnT
       } else {
         setWaitingForInput(true);
       }
+      // 漫卷自动记忆：计数 + 达到阈值时滚动总结/统一总结（后台执行，不阻塞生成）
+      void afterVnGeneration(characterId);
     } catch (err) {
       console.error("VN generation error:", err);
       setWaitingForInput(true);
@@ -727,6 +762,8 @@ export function VnPlayer({ characterId, chapterIndex, onClose, onChapterEnd, vnT
       } else {
         setWaitingForInput(true);
       }
+      // 漫卷自动记忆：计数 + 达到阈值时滚动总结/统一总结（后台执行，不阻塞生成）
+      void afterVnGeneration(characterId);
     } catch (err) {
       console.error("VN generation error:", err);
       setWaitingForInput(true);

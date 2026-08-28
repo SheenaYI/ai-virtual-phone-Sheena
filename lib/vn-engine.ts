@@ -23,7 +23,7 @@ import type { VnMessage } from "./vn-storage";
 import { createOrGetVnSession, formatBeatsForPrompt, loadVnConfig } from "./vn-storage";
 import { DEFAULT_VN_BILINGUAL_PROMPT, resolveBilingualPrompt } from "./bilingual-prompt-defaults";
 
-export const DEFAULT_VN_SUMMARY_PROMPT = "以下是{{char}}与{{user}}在漫卷模式中的一章对话。请用200字以内的中文总结这一章的关键剧情、关系变化和情感走向。";
+export const DEFAULT_VN_SUMMARY_PROMPT = "以下是{{char}}与{{user}}在漫卷模式中的一段对话。请用200字以内的中文总结其中的关键剧情、关系变化和情感走向。若提供了此前的章节总结，请结合此前总结与这段最新对话，输出更新后的完整章节总结，不要遗漏此前已发生的重要事件。";
 import { getVnSceneNames, getVnSpriteNames } from "./vn-asset-storage";
 import type { ChatMessage } from "./chat-storage";
 import type { VnFrame, VnOptions } from "./vn-types";
@@ -212,7 +212,8 @@ export async function previewVnPromptPayload(
 
 export async function summarizeVnChapter(
   characterId: string,
-  messages: VnMessage[]
+  messages: VnMessage[],
+  options?: { previousSummary?: string }
 ): Promise<string> {
   const apiConfig = resolveAuxiliaryApiConfig("memorySummaryApiConfigId");
   if (!apiConfig) {
@@ -225,9 +226,13 @@ export async function summarizeVnChapter(
   const userName = userIdentity?.name ?? "用户";
   const memConfig = loadMemoryConfig();
   const customPrompt = memConfig.vnSummaryPrompt?.trim() || DEFAULT_VN_SUMMARY_PROMPT;
-  const resolvedPrompt = customPrompt
+  let resolvedPrompt = customPrompt
     .replace(/\{\{char(?:Name)?\}\}/g, charName)
     .replace(/\{\{user(?:Name)?\}\}/g, userName);
+  const previousSummary = options?.previousSummary?.trim();
+  if (previousSummary) {
+    resolvedPrompt = `此前的章节总结：\n${previousSummary}\n\n${resolvedPrompt}`;
+  }
 
   // Build conversation text
   const lines = messages.map((m) => {
