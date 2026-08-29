@@ -221,6 +221,9 @@ class MainActivity : AppCompatActivity() {
         @JavascriptInterface
         fun getVersion(): String = VERSION
 
+        @JavascriptInterface
+        fun getPushDeviceIdentity(): String = PushService.deviceIdentityJson(this@MainActivity)
+
         /** 打开本应用的系统设置页（引导用户关电池限制、开自启动）。 */
         @JavascriptInterface
         fun openAppSettings() {

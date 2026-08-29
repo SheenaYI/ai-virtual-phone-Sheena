@@ -73,6 +73,30 @@ export async function broadcastShellNotify(
   }
 }
 
+export async function broadcastShellDeviceNotify(
+  deviceId: string,
+  message: { title: string; body: string; url?: string },
+): Promise<boolean> {
+  const config = getSupabaseServerConfig();
+  if (!config) return false;
+  try {
+    const response = await fetch(`${config.url}/realtime/v1/api/broadcast`, {
+      method: "POST",
+      headers: { apikey: config.key, Authorization: `Bearer ${config.key}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ messages: [{
+        topic: `shellpush:device:${deviceId}`,
+        event: "notify",
+        payload: { title: message.title, body: message.body, url: message.url || "/" },
+      }] }),
+      cache: "no-store",
+    });
+    await response.text().catch(() => undefined);
+    return response.ok;
+  } catch {
+    return false;
+  }
+}
+
 /** VAPID subject 必须是 https: 或 mailto:。本地 http 环境回退到 mailto。 */
 export function resolvePushSubject(requestUrl: string): string {
   try {

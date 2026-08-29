@@ -328,9 +328,21 @@ export async function disableOfflinePush(): Promise<{ ok: boolean; error?: strin
 }
 
 export async function sendTestOfflinePush(): Promise<{ ok: boolean; error?: string }> {
-    const response = await (isPersonalPushCloudActive()
+    const shell = typeof window !== "undefined" ? (window as Window & {
+        AndroidShell?: { getPushDeviceIdentity?: () => string };
+    }).AndroidShell : undefined;
+    const shellIdentity = isShellEnvironment() && shell?.getPushDeviceIdentity
+        ? shell.getPushDeviceIdentity()
+        : "";
+    const response = await (shellIdentity
+        ? fetch("/api/shell/test", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: shellIdentity,
+        })
+        : isPersonalPushCloudActive()
         ? personalPushFetch("test", { method: "POST" })
-        : fetch("/api/push/test", { method: "POST", credentials: "include"}))
+        : fetch("/api/push/test", { method: "POST", credentials: "include" }))
         .catch(() => null);
     if (!response) return { ok: false, error: "网络异常。" };
     const data = await response.json().catch(() => ({})) as { ok?: boolean; error?: string };

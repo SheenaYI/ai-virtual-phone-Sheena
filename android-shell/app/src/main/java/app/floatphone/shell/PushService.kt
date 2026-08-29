@@ -9,7 +9,6 @@ import android.content.Context
 import android.content.Intent
 import android.os.Build
 import android.os.IBinder
-import android.webkit.CookieManager
 import androidx.core.app.NotificationCompat
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
@@ -20,6 +19,7 @@ import okhttp3.WebSocket
 import okhttp3.WebSocketListener
 import org.json.JSONObject
 import java.util.concurrent.TimeUnit
+import java.util.UUID
 import kotlin.concurrent.thread
 
 /**
@@ -38,7 +38,19 @@ class PushService : Service() {
         private const val CH_MESSAGES = "shell_messages"
         private const val CH_CALLS = "shell_calls"
         private const val NOTIF_FG_ID = 1
+        private const val PREFS = "shell_push"
+        private const val PREF_DEVICE_ID = "device_id"
+        private const val PREF_DEVICE_TOKEN = "device_token"
         private var running = false
+
+        fun deviceIdentityJson(context: Context): String {
+            val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            val deviceId = prefs.getString(PREF_DEVICE_ID, null) ?: "shell_${UUID.randomUUID()}".also {
+                prefs.edit().putString(PREF_DEVICE_ID, it).apply()
+            }
+            val token = prefs.getString(PREF_DEVICE_TOKEN, null) ?: "";
+            return JSONObject().put("deviceId", deviceId).put("deviceToken", token).toString()
+        }
 
         fun start(context: Context) {
             if (running) return
@@ -57,7 +69,6 @@ class PushService : Service() {
     private var stopped = false
     private var msgSeq = 2
     private var notifId = 100
-    private var shellSubRegistered = false
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -84,7 +95,7 @@ class PushService : Service() {
         while (!stopped) {
             val config = fetchConfig()
             if (config == null) {
-                updateKeepAlive("未登录或站点不可达，稍后重试")
+                updateKeepAlive("设备未注册或站点不可达，稍后重试")
                 sleepSec(60); continue
             }
             updateKeepAlive("已连接，等待角色消息")
@@ -99,58 +110,41 @@ class PushService : Service() {
 
     private data class PushConfig(val supabaseUrl: String, val anonKey: String, val userId: String)
 
-    /** 借 WebView 的登录 Cookie 调站点接口获取连接参数。 */
+    /** 使用 APK 本地设备令牌获取连接参数，不依赖网页登录状态。 */
     private fun fetchConfig(): PushConfig? = runCatching {
-        val cookie = CookieManager.getInstance().getCookie(MainActivity.SITE_URL) ?: return null
-
-        fun getJson(path: String): JSONObject? {
-            val request = Request.Builder()
-                .url("${MainActivity.SITE_URL}$path")
-                .header("Cookie", cookie)
-                .header("Accept", "application/json")
-                .build()
-            client.newCall(request).execute().use { response ->
-                if (!response.isSuccessful) return null
-                return JSONObject(response.body?.string() ?: return null)
-            }
+        val prefs = getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        val deviceId = prefs.getString(PREF_DEVICE_ID, null) ?: "shell_${UUID.randomUUID()}".also {
+            prefs.edit().putString(PREF_DEVICE_ID, it).apply()
         }
-
-        val me = getJson("/api/auth/me") ?: return null
-        val userId = me.optJSONObject("account")?.optString("id").orEmpty()
-        if (userId.isEmpty()) return null
-        val online = getJson("/api/online/config") ?: return null
-        if (!online.optBoolean("configured")) return null
-        val url = online.optString("supabaseUrl")
-        val key = online.optString("anonKey")
+        var deviceToken = prefs.getString(PREF_DEVICE_TOKEN, null).orEmpty()
+        if (deviceToken.isEmpty()) {
+            deviceToken = (UUID.randomUUID().toString() + UUID.randomUUID().toString()).replace("-", "")
+            prefs.edit().putString(PREF_DEVICE_TOKEN, deviceToken).apply()
+        }
+        val registered = postJson(
+            "/api/shell/register",
+            JSONObject().put("deviceId", deviceId).put("deviceToken", deviceToken),
+        ) ?: return null
+        if (registered.optString("deviceToken").isEmpty()) return null
+        val config = postJson(
+            "/api/shell/push-config",
+            JSONObject().put("deviceId", deviceId).put("deviceToken", deviceToken),
+        ) ?: return null
+        val url = config.optString("supabaseUrl")
+        val key = config.optString("anonKey")
         if (url.isEmpty() || key.isEmpty()) return null
-        registerShellSubscription(cookie, userId)
-        PushConfig(url.trimEnd('/'), key, userId)
+        PushConfig(url.trimEnd('/'), key, deviceId)
     }.getOrNull()
 
-    /**
-     * 在站点注册一条合成推送订阅（endpoint = shell:<userId>）。
-     * 作用是让离线消息排期的"账号已订阅"门控放行，并让服务端知道
-     * 要往 shellpush 频道广播；服务端不会对它做 Web Push 投递。
-     */
-    private fun registerShellSubscription(cookie: String, userId: String) {
-        if (shellSubRegistered) return
-        runCatching {
-            val body = JSONObject()
-                .put("endpoint", "shell:$userId")
-                .put(
-                    "keys",
-                    JSONObject().put("p256dh", "shell").put("auth", "shell"),
-                )
-                .toString()
-                .toRequestBody("application/json".toMediaType())
-            val request = Request.Builder()
-                .url("${MainActivity.SITE_URL}/api/push/subscribe")
-                .header("Cookie", cookie)
-                .post(body)
-                .build()
-            client.newCall(request).execute().use { response ->
-                if (response.isSuccessful) shellSubRegistered = true
-            }
+    private fun postJson(path: String, payload: JSONObject): JSONObject? {
+        val request = Request.Builder()
+            .url("${MainActivity.SITE_URL}$path")
+            .header("Accept", "application/json")
+            .post(payload.toString().toRequestBody("application/json".toMediaType()))
+            .build()
+        return client.newCall(request).execute().use { response ->
+            if (!response.isSuccessful) return null
+            JSONObject(response.body?.string() ?: return null)
         }
     }
 
@@ -158,7 +152,7 @@ class PushService : Service() {
     private fun runSocket(config: PushConfig): Boolean {
         val wsUrl = config.supabaseUrl.replaceFirst("http", "ws") +
             "/realtime/v1/websocket?apikey=${config.anonKey}&vsn=1.0.0"
-        val topic = "realtime:shellpush:${config.userId}"
+        val topic = "realtime:shellpush:device:${config.userId}"
         val lock = Object()
         var normal = false
         var done = false
