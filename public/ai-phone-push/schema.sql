@@ -62,6 +62,18 @@ create table if not exists public.push_subscriptions (
 );
 create index if not exists push_subscriptions_user_idx on public.push_subscriptions (user_id);
 
+-- 安卓壳单机设备推送：令牌只以 SHA-256 哈希形式保存，设备本身保存原始令牌。
+create table if not exists public.shell_devices (
+  device_id text primary key,
+  token_hash text not null unique,
+  enabled boolean not null default true,
+  created_at timestamptz not null default now(),
+  last_seen_at timestamptz not null default now()
+);
+
+create index if not exists shell_devices_enabled_idx
+  on public.shell_devices (enabled, last_seen_at desc);
+
 create table if not exists public.push_jobs (
   id text primary key,
   user_id text not null,
