@@ -1,12 +1,13 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ArrowLeft, Plus, BookOpen } from "lucide-react";
+import { ArrowLeft, Plus, BookOpen, Trash2 } from "lucide-react";
 import { loadCharacters } from "@/lib/character-storage";
 import {
   createOrGetVnSession,
   startNewChapter,
   updateChapterSummary,
+  clearChapterSummary,
   loadVnMessagesForChapter,
 } from "@/lib/vn-storage";
 import { summarizeVnChapter } from "@/lib/vn-engine";
@@ -29,6 +30,7 @@ export function VnChapters({ characterId, onClose, onSelect, vnTheme }: VnChapte
   const [mounted, setMounted] = useState(false);
   const [, forceUpdate] = useState(0);
   const [summarizing, setSummarizing] = useState<number | null>(null);
+  const [confirmClearSummaryIndex, setConfirmClearSummaryIndex] = useState<number | null>(null);
 
   const character = useMemo(() => {
     return loadCharacters().find((c) => c.id === characterId);
@@ -72,6 +74,12 @@ export function VnChapters({ characterId, onClose, onSelect, vnTheme }: VnChapte
       setSummarizing(null);
     }
   }, [session.id, characterId]);
+
+  const handleClearSummary = useCallback((chapterIndex: number) => {
+    clearChapterSummary(session.id, chapterIndex);
+    setConfirmClearSummaryIndex(null);
+    forceUpdate((n) => n + 1);
+  }, [session.id]);
 
   const nodeSpacing = 120;
   const totalHeight = (chapters.length + 1) * nodeSpacing + 200;
@@ -348,6 +356,46 @@ export function VnChapters({ characterId, onClose, onSelect, vnTheme }: VnChapte
           letter-spacing: 0.05em;
           margin-top: 2px;
         }
+
+        /* ── 清除章节记忆确认弹层 ── */
+        .vnc-confirm-overlay {
+          position: absolute; inset: 0; z-index: 60;
+          background: rgba(0,0,0,0.55);
+          display: flex; align-items: center; justify-content: center;
+        }
+        .vnc-confirm-card {
+          width: 78%; max-width: 300px;
+          background: var(--vn-bg, #141022);
+          border: 1px solid var(--vn-ui-border, rgba(160,140,240,0.35));
+          border-radius: 16px;
+          padding: 20px 18px;
+          color: var(--vn-ui-text, #fff);
+          font-family: inherit;
+          box-shadow: 0 12px 40px rgba(0,0,0,0.4);
+        }
+        .vnc-confirm-title {
+          font-size: calc(15px*var(--app-text-scale,1));
+          font-weight: 600;
+          margin-bottom: 8px;
+        }
+        .vnc-confirm-desc {
+          font-size: calc(12px*var(--app-text-scale,1));
+          color: var(--vn-ui-text-dim, rgba(255,255,255,0.6));
+          line-height: 1.6;
+          margin-bottom: 18px;
+        }
+        .vnc-confirm-btns { display: flex; gap: 10px; }
+        .vnc-confirm-btn {
+          flex: 1; padding: 9px 0; border-radius: 10px;
+          border: 1px solid var(--vn-ui-border, rgba(160,140,240,0.35));
+          background: transparent; color: var(--vn-ui-text, #fff);
+          font-size: calc(13px*var(--app-text-scale,1)); font-family: inherit;
+          cursor: pointer;
+        }
+        .vnc-confirm-btn-danger {
+          background: rgba(220,60,60,0.22);
+          border-color: rgba(220,60,60,0.45);
+        }
       `}</style>
 
       {/* ── Top Bar ── */}
@@ -398,7 +446,18 @@ export function VnChapters({ characterId, onClose, onSelect, vnTheme }: VnChapte
                   {ch.subtitle && <div className="vnc-chapter-sub">{ch.subtitle}</div>}
                   {ch.summaryContent && <div className="vnc-summary-badge">已生成记忆</div>}
                 </div>
-                {/* Summarize button for archived chapters without summary */}
+                {/* 章节操作：有总结记忆 → 可清除；已归档且无总结 → 可生成 */}
+                {ch.summaryContent && (
+                  <div className="vnc-actions" onClick={(e) => e.stopPropagation()}>
+                    <button
+                      className="vnc-action-btn"
+                      title="清除本章记忆"
+                      onClick={() => setConfirmClearSummaryIndex(i)}
+                    >
+                      <Trash2 size={12} />
+                    </button>
+                  </div>
+                )}
                 {ch.archived && !ch.summaryContent && (
                   <div className="vnc-actions" onClick={(e) => e.stopPropagation()}>
                     <button
@@ -431,6 +490,23 @@ export function VnChapters({ characterId, onClose, onSelect, vnTheme }: VnChapte
           </button>
         </div>
       </div>
+
+      {/* 清除章节记忆确认弹层 */}
+      {confirmClearSummaryIndex !== null && (() => {
+        const ch = chapters[confirmClearSummaryIndex];
+        return (
+          <div className="vnc-confirm-overlay" onClick={() => setConfirmClearSummaryIndex(null)}>
+            <div className="vnc-confirm-card" onClick={(e) => e.stopPropagation()}>
+              <div className="vnc-confirm-title">清除「{ch?.title ?? "本章"}」的记忆？</div>
+              <div className="vnc-confirm-desc">将删除本章已生成的章节总结记忆。聊天记录与归档状态不受影响，之后可重新生成。</div>
+              <div className="vnc-confirm-btns">
+                <button className="vnc-confirm-btn" onClick={() => setConfirmClearSummaryIndex(null)}>取消</button>
+                <button className="vnc-confirm-btn vnc-confirm-btn-danger" onClick={() => handleClearSummary(confirmClearSummaryIndex)}>清除</button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
 
     </div>
   );

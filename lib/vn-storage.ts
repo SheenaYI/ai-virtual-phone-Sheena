@@ -330,6 +330,25 @@ export function updateChapterSummary(
   updateVnSession(sessionId, { chapters });
 }
 
+/** 清除章节已生成的总结记忆（summaryContent/summaryTimestamp），不影响章节与聊天记录。
+ *  用于清理脏总结：清除后该章节的投影条目从短期记忆消失，需要时可重新生成。 */
+export function clearChapterSummary(
+  sessionId: string,
+  chapterIndex: number
+): void {
+  const session = _sessionsCache.find((s) => s.id === sessionId);
+  if (!session) return;
+
+  const chapters = [...session.chapters];
+  const ch = chapters[chapterIndex];
+  if (!ch) return;
+
+  const { summaryContent: _summaryContent, summaryTimestamp: _summaryTimestamp, ...rest } = ch;
+  chapters[chapterIndex] = rest;
+
+  updateVnSession(sessionId, { chapters });
+}
+
 export function updateChapterStartMessageId(
   sessionId: string,
   chapterIndex: number,
