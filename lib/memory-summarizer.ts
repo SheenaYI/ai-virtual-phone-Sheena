@@ -106,7 +106,7 @@ export async function runSummarizationPipeline(
     const result = await simpleLLMCall(
         apiConfig,
         [{ role: "user", content: summaryPrompt }],
-        { temperature: 0.3, label: `记忆总结·${characterName}` },
+        { temperature: 0.3, label: `记忆总结·${characterName}`, allowReasoningFallback: false },
     );
 
     if (!result.content) {

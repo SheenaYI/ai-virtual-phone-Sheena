@@ -98,7 +98,7 @@ export function isNativeGoogleApi(config: ApiConfig): boolean {
 export async function simpleLLMCall(
     config: ApiConfig,
     messages: { role: string; content: string }[],
-    options?: { temperature?: number; max_tokens?: number; signal?: AbortSignal; label?: string },
+    options?: { temperature?: number; max_tokens?: number; signal?: AbortSignal; label?: string; allowReasoningFallback?: boolean },
 ): Promise<{ content: string | null; error?: string; finishReason?: string; wasTruncated?: boolean }> {
     const baseUrl = determineBaseUrl(config);
     if (!baseUrl || !config.apiKey) {
@@ -178,7 +178,7 @@ export async function simpleLLMCall(
         const data = await res.json();
 
         // Extract content — try multiple response formats for maximum compatibility
-        const content = extractLLMContent(data, config.provider);
+        const content = extractLLMContent(data, config.provider, { allowReasoningFallback: options?.allowReasoningFallback ?? true });
         const finishReason = extractFinishReason(data);
         const wasTruncated = isTruncationFinishReason(finishReason);
         pushApiLog({
@@ -358,7 +358,7 @@ function extractGeminiVisibleText(parts: unknown): string | null {
     return visible || null;
 }
 
-export function extractLLMContent(data: Record<string, unknown>, provider?: string): string | null {
+export function extractLLMContent(data: Record<string, unknown>, provider?: string, options?: { allowReasoningFallback?: boolean }): string | null {
     if (!data) return null;
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -388,7 +388,11 @@ export function extractLLMContent(data: Record<string, unknown>, provider?: stri
     // Last resort: reasoning models (DeepSeek-R1 / v4-pro) put their output in
     // reasoning_content and may leave content empty when max_tokens is exhausted
     // mid-thought. Surface the reasoning rather than reporting an empty response.
-    if (!raw) { const reasoning = d?.choices?.[0]?.message?.reasoning_content; if (reasoning) raw = String(reasoning).trim(); }
+    // 总结类等调用方通过 allowReasoningFallback:false 关闭该兜底：思考草稿不是
+    // 可用正文，宁可让上层报错重试，也不要把思考过程当结果返回（污染记忆）。
+    if (options?.allowReasoningFallback !== false) {
+        if (!raw) { const reasoning = d?.choices?.[0]?.message?.reasoning_content; if (reasoning) raw = String(reasoning).trim(); }
+    }
 
     if (!raw) return null;
 

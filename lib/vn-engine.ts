@@ -250,9 +250,14 @@ export async function summarizeVnChapter(
 
   const result = await simpleLLMCall(apiConfig, [{ role: "user", content: prompt }], {
     temperature: 0.3,
-    max_tokens: 500,
+    max_tokens: 1500,
+    // 关闭 reasoning 兜底：content 为空时报错重试，绝不用模型思考草稿充当章节总结
+    allowReasoningFallback: false,
   });
 
+  if (result.wasTruncated) {
+    throw new ChatEngineError("章节总结输出被截断，未保存，请重试或更换总结模型");
+  }
   if (result.error || !result.content) {
     throw new ChatEngineError(result.error || "章节总结生成失败");
   }
