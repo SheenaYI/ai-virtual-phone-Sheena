@@ -17,18 +17,7 @@ const FRAME_MIN_HEIGHT = 36;
  */
 const FRAME_MAX_HEIGHT = 5000;
 
-/**
- * 折叠区强制摊开的注入脚本：瀑布卡的自动封面用（expandFolds）。
- * 卡面缩样是给人认东西的，得和大厅列表的静态封面（拍图时同样摊开）长一个样；
- * 渲染代码可能在 load 之后才把 DOM 画出来，所以挂 MutationObserver 持续摊。
- */
-const FOLD_OPEN_BRIDGE = `<script>(function(){
-  function open(){var d=document.querySelectorAll("details:not([open])");for(var i=0;i<d.length;i++){try{d[i].setAttribute("open","")}catch(e){}}}
-  if(window.MutationObserver)new MutationObserver(open).observe(document.documentElement,{childList:true,subtree:true});
-  window.addEventListener("load",open);open();
-})();</` + `script>`;
-
-export function MixTicketFrame({ html, raw, state, expandFolds }: { html: string; raw: string; state?: MixState; expandFolds?: boolean }) {
+export function MixTicketFrame({ html, raw, state }: { html: string; raw: string; state?: MixState }) {
     const iframeRef = useRef<HTMLIFrameElement | null>(null);
     const [frameId] = useState(() => `mtf_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`);
     const [height, setHeight] = useState(FRAME_MIN_HEIGHT);
@@ -52,9 +41,8 @@ export function MixTicketFrame({ html, raw, state, expandFolds }: { html: string
   if(document.fonts&&document.fonts.ready)document.fonts.ready.then(sched);
   setTimeout(send,60);setTimeout(send,400);setTimeout(send,1200);
 })();</` + `script>`;
-        const inject = (expandFolds ? FOLD_OPEN_BRIDGE : "") + bridge;
-        return /<\/body>/i.test(doc) ? doc.replace(/<\/body>/i, `${inject}</body>`) : doc + inject;
-    }, [html, raw, state, frameId, expandFolds]);
+        return /<\/body>/i.test(doc) ? doc.replace(/<\/body>/i, `${bridge}</body>`) : doc + bridge;
+    }, [html, raw, state, frameId]);
 
     useEffect(() => {
         const handleMessage = (event: MessageEvent) => {

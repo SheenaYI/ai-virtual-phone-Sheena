@@ -121,8 +121,7 @@ async function shoot(browser, doc) {
     // 等渲染代码把 DOM 画完（它可能在 load 之后才填内容），与线上抓拍同一拍
     await new Promise((r) => setTimeout(r, SETTLE_MS));
     const size = await page.evaluate(() => {
-      // 折叠件先摊开再拍：与线上拍图和酒柜卡的实时缩样同口径（见 mat-thumb.ts）
-      for (const el of document.querySelectorAll("details:not([open])")) el.setAttribute("open", "");
+      // 折叠件保持收起状态原样拍：与线上拍图和酒柜卡的实时缩样同口径（见 mat-thumb.ts）
       const b = document.body;
       if (!b) return { w: 1, h: 1 };
       const cs = window.getComputedStyle(b);

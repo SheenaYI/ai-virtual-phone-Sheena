@@ -25,6 +25,10 @@ export type OfflineShortcutAction = {
   deliveryMode: "push" | "email";
   resultMode: "none" | "text" | "image";
   expiresInSeconds?: number;
+  /** 动作说明：微信通道的能力菜单里给角色看 */
+  description?: string;
+  /** 参数 JSON Schema 原文：云端（微信通道等）据此教角色写带参标记；没配参数则为空 */
+  parameterSchema?: string;
 };
 
 // 离线续跑占位符（整值精确匹配，与前台续跑同一套替换契约）：
@@ -39,12 +43,15 @@ export type OfflineShortcutContinuation = {
   replyMarker: string;
   resultMarker: string;
   imageMarker: string;
+  /** 该角色 API 的图像识别开关：关着时云端不注入图片，只在图片位代入一句说明 */
+  visionEnabled: boolean;
 };
 
 /** 有会回传结果的快捷动作时，预挂一份"结果续跑"快照（与前台 text 式续跑同构）。 */
 export function buildOfflineShortcutContinuation(
   llmMessages: LLMMessage[],
   buildRequest: (messages: LLMMessage[]) => OfflineShortcutContinuation["request"],
+  visionEnabled: boolean,
 ): OfflineShortcutContinuation | null {
   if (!availableActions().some(action => action.resultMode !== "none")) return null;
   try {
@@ -59,6 +66,7 @@ export function buildOfflineShortcutContinuation(
       replyMarker: OFFLINE_SHORTCUT_REPLY_MARKER,
       resultMarker: OFFLINE_SHORTCUT_RESULT_MARKER,
       imageMarker: OFFLINE_SHORTCUT_IMAGE_MARKER,
+      visionEnabled,
     };
   } catch {
     return null;
@@ -115,6 +123,11 @@ export function listOfflineShortcutActions(): OfflineShortcutAction[] {
     deliveryMode: action.deliveryMode,
     resultMode: action.resultMode,
     expiresInSeconds: action.expiresInSeconds,
+    ...(action.description?.trim() ? { description: action.description.trim().slice(0, 200) } : {}),
+    // 参数 schema 只同步解析得通的：云端拿它教角色写带参标记，坏 JSON 教不了
+    ...(action.parameterSchema?.trim() && parseBridgeActionParameterSchema(action.parameterSchema)
+      ? { parameterSchema: action.parameterSchema.trim().slice(0, 8000) }
+      : {}),
   }));
 }
 

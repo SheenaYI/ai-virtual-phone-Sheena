@@ -283,6 +283,8 @@ type JobPayload = {
     replyMarker: string;
     resultMarker: string;
     imageMarker?: string;
+    /** 角色 API 的图像识别开关（客户端挂快照时写入）；缺省视为开，兼容老快照 */
+    visionEnabled?: boolean;
   };
   merge?: Record<string, unknown> & { sessionId?: string };
 };
@@ -299,6 +301,10 @@ type ShortcutCommandRow = {
 
 // 【快捷动作：名称】与带参数的【快捷动作：名称({...})】都要认。参数允许换行
 // （模型爱把 JSON 展开写），所以参数段用 [\s\S] 而不是 [^\n]。
+/** 识图关着时代替截图进上下文的说明：不留这句话，模型面对的是空白，
+ *  既不知道图回没回来，也不知道自己为什么看不见。 */
+const SHORTCUT_VISION_OFF_NOTE = "（系统记录：未配置或未启用图像识别，本轮回传的图片没有交给你；请结合上一条的文字内容回应。）";
+
 const SHORTCUT_MARKER_RE = /【快捷动作[：:]\s*([^(（）)】\n]{1,60}?)\s*(?:[(（]([\s\S]{0,2000}?)[)）])?\s*】/;
 const SHORTCUT_MARKER_STRIP_RE = new RegExp(SHORTCUT_MARKER_RE.source, "g");
 
@@ -306,14 +312,16 @@ const SHORTCUT_MARKER_STRIP_RE = new RegExp(SHORTCUT_MARKER_RE.source, "g");
 function parseShortcutMarkerArgs(raw: string | undefined): Record<string, unknown> {
   const text = (raw ?? "").trim();
   if (!text) return {};
-  try {
-    const parsed = JSON.parse(text) as unknown;
-    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
-      ? parsed as Record<string, unknown>
-      : {};
-  } catch {
-    return {};
+  // 模型爱用全角标点（中文引号/冒号/逗号），原文解析失败就按归一化后的再试一次
+  const candidates = [text, text.replace(/[\u201c\u201d\u201e\u201f]/g, '"').replace(/\uff1a/g, ":").replace(/\uff0c/g, ",")];
+  for (const candidate of candidates) {
+    try {
+      const parsed = JSON.parse(candidate) as unknown;
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) return parsed as Record<string, unknown>;
+    } catch { /* try next */ }
   }
+  console.warn(`[push-generate] 快捷动作参数解析失败 raw=${text.slice(0, 200)}`);
+  return {};
 }
 
 function shortcutResultText(value: unknown): string {
@@ -644,6 +652,10 @@ Deno.serve(async (req: Request) => {
     // 动作目录在 push_bridge_config.shortcut_actions（个人云由客户端同步；
     // 老库/站点库无此列时查询失败即视为无目录，不执行）。标记一律从正文剥离。
     let shortcutActionNote = "";
+    // 实际执行过的快捷动作标记（原文+在剥离后正文中的位置）：随 outbox 带回
+    // 小手机，在原始位置落一对 tool_call/tool_notice——上下文里是标记原文，
+    // 角色下一轮才知道自己传过什么参数（否则「换一首歌」会换出同一首）
+    let executedShortcutMarker: { text: string; insertAt: number; name: string } | null = null;
     let deferredShortcutCommandId = "";
     let deferredShortcutActionName = "";
     type DeferredShortcutEmail = {
@@ -786,8 +798,15 @@ Deno.serve(async (req: Request) => {
     if (!payload.shortcut) {
       const markerMatch = rawText.match(SHORTCUT_MARKER_RE);
       if (markerMatch) {
+        const markerText = markerMatch[0];
+        // 标记在剥离后正文中的原始位置：对前缀做同一套清洗后取长度（尾部 trim 不影响前缀）
+        const cleanedPrefix = rawText.slice(0, markerMatch.index ?? 0)
+          .replace(SHORTCUT_MARKER_STRIP_RE, "")
+          .replace(/\n{3,}/g, "\n\n")
+          .replace(/^\s+/, "");
         rawText = rawText.replace(SHORTCUT_MARKER_STRIP_RE, "").replace(/\n{3,}/g, "\n\n").trim();
         if (!rawText) rawText = "……";
+        const markerInsertAt = Math.min(cleanedPrefix.length, rawText.length);
         const wanted = markerMatch[1].trim();
         const wantedArgs = parseShortcutMarkerArgs(markerMatch[2]);
         try {
@@ -837,6 +856,9 @@ Deno.serve(async (req: Request) => {
             shortcutActionNote = createResponse.ok && createData.ok
               ? `shortcut sent: ${wanted}`
               : `shortcut failed: http ${createResponse.status}`;
+            if (createResponse.ok && createData.ok) {
+              executedShortcutMarker = { text: markerText, insertAt: markerInsertAt, name: wanted };
+            }
 
             // 邮件模式：个人云没有发信服务（RESEND_API_KEY 是站点的环境变量），
             // 请站点凭 site_bridge_token 代发那封信。命令行与结果回传仍留在本项目。
@@ -865,8 +887,16 @@ Deno.serve(async (req: Request) => {
                 const contRequest = JSON.parse(JSON.stringify(continuation.request)) as JobPayload["request"];
                 replaceMarker(contRequest.body, continuation.replyMarker, rawText);
                 const isImage = resultMode === "image";
-                if (!isImage && continuation.imageMarker) {
-                  replaceMarker(contRequest.body, continuation.imageMarker, "（该动作没有图片回传）");
+                // 识图关着就不送图：送了轻则被模型忽略，重则接口直接 400 让整个
+                // 第二轮失败（角色说了"我去看一眼"然后没有下文）。图片位改放一句
+                // 说明，OCR 之类的附带文字仍照常经 resultMarker 抵达。
+                const canSendImage = isImage && continuation.visionEnabled !== false;
+                if (!canSendImage && continuation.imageMarker) {
+                  replaceMarker(
+                    contRequest.body,
+                    continuation.imageMarker,
+                    isImage ? SHORTCUT_VISION_OFF_NOTE : "（该动作没有图片回传）",
+                  );
                 }
                 const expiresIn = Math.max(30, Math.min(900, Number(action.expiresInSeconds) || 120));
                 const contPayload = {
@@ -876,7 +906,7 @@ Deno.serve(async (req: Request) => {
                     actionName: String(action.name ?? "快捷动作"),
                     resultMode,
                     resultMarker: continuation.resultMarker,
-                    ...(isImage && continuation.imageMarker ? { imageMarker: continuation.imageMarker } : {}),
+                    ...(canSendImage && continuation.imageMarker ? { imageMarker: continuation.imageMarker } : {}),
                     style: "text",
                   },
                   notify: payload.notify,
@@ -949,6 +979,10 @@ Deno.serve(async (req: Request) => {
         if (markerAt >= 0) {
           rawText = (rawText.slice(0, markerAt) + rawText.slice(markerAt + WEIXIN_MARKER.length)).trim();
           if (!rawText) rawText = "……";
+          // 微信标记被剥掉后，快捷动作标记的还原位置要跟着前移（消费端还会钳位兜底）
+          if (executedShortcutMarker && markerAt < executedShortcutMarker.insertAt) {
+            executedShortcutMarker.insertAt = Math.max(0, executedShortcutMarker.insertAt - WEIXIN_MARKER.length);
+          }
         }
         const weixinBotId = typeof payload.weixin?.botId === "string" ? payload.weixin.botId : "";
         if (!weixinBotId) await progress(`${forceWeixin ? "forced weixin" : "weixin marker"} but no bot in snapshot`);
@@ -1016,7 +1050,11 @@ Deno.serve(async (req: Request) => {
         session_id: payload.merge?.sessionId ?? null,
         trigger_key: job.trigger_key,
         raw_text: rawText,
-        meta: { ...(payload.merge ?? {}), pushGenerated: true },
+        meta: {
+          ...(payload.merge ?? {}),
+          pushGenerated: true,
+          ...(executedShortcutMarker ? { shortcutMarker: executedShortcutMarker } : {}),
+        },
       }]),
     });
     if (!outboxResponse.ok) {

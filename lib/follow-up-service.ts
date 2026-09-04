@@ -32,6 +32,7 @@ import {
 import { loadFollowUpConfig } from "./settings-storage";
 import { parseAIResponse } from "./rich-message-parser";
 import type { ParsedMessagePart } from "./rich-message-parser";
+import { getStatusRegionConfig, isCustomStatusRegionActive } from "./chat-status-region";
 import { isKnownStickerLabel } from "./sticker-data";
 import { loadCharacters } from "./character-storage";
 import { bgSetInterval, bgSetTimeout } from "./bg-timer";
@@ -886,6 +887,10 @@ export async function parseAndSaveResponse(
         createdAt?: string;
         rawResponseText?: string;
         reasoningText?: string;
+        /** 这轮回复实际触发过的快捷动作标记：按 insertAt 在原始位置落一对
+         *  tool_call（标记原文，组装器原样进上下文、气泡隐藏）+ tool_notice
+         *  （可见灰条），与小手机内直接调用快捷动作的显示一致 */
+        shortcutMarker?: { text: string; insertAt: number; name: string };
     },
 ): Promise<{ hasVisible: boolean; newCount: number; stateValues: StateValue[] }> {
     const responseBatchId = options?.responseBatchId || createResponseBatchId();
@@ -898,9 +903,34 @@ export async function parseAndSaveResponse(
 
     const { parts, stateValues, freshStateValues, statusPanel, innerMonologue } = parseAIResponse(rawText, previousState);
 
+    // 自定义状态栏渲染戳：追发/屏幕速聊/离线回传落库的消息此前从不盖
+    // statusRegionMode，custom 模式下 [状态栏] 原文被当 markdown 渲染成一坨
+    // "掉格式"（只有正常聊天路径盖了戳）。与 chat-room 一致：按当前会话配置盖。
+    const statusRegionMode = statusPanel && isCustomStatusRegionActive(getStatusRegionConfig(sessionId))
+        ? ("custom" as const)
+        : undefined;
+
     // Detect call triggers and AI media actions, filter them out (not stored as messages)
     let triggerCall: "voice" | "video" | undefined;
     const charName = resolveFollowUpSenderName(sessionId);
+
+    // 快捷动作配对消息：tool_call 存标记原文（组装器不跳过，历史上下文与模型当初
+    // 的输出一致），tool_notice 是用户可见的灰条。按 insertAt 用游标扫描把配对
+    // 插回标记原来所在的分条位置，不挪到末尾；找不到对应位置时兜底放在最后。
+    const shortcutMarker = options?.shortcutMarker;
+    const findShortcutMarkerPartIdx = (parts: ParsedMessagePart[]): number => {
+        if (!shortcutMarker) return -1;
+        let cursor = 0;
+        for (let i = 0; i < parts.length; i++) {
+            const probe = (parts[i].content || "").trim();
+            const at = probe ? rawText.indexOf(probe, cursor) : -1;
+            if (at >= 0) {
+                if (at >= shortcutMarker.insertAt) return i;
+                cursor = at + probe.length;
+            }
+        }
+        return parts.length;
+    };
 
     const filteredParts: ParsedMessagePart[] = [];
     for (const p of parts) {
@@ -953,11 +983,32 @@ export async function parseAndSaveResponse(
                 responseBatchId,
                 rawResponseText,
                 statusPanel,
+                statusRegionMode,
                 innerMonologue,
                 reasoningText,
                 stateValues: stateValues.length > 0 ? stateValues : undefined,
                 freshStateValues,
                 ...(followUpIndex ? { followUpIndex } : {}),
+            });
+        }
+        if (shortcutMarker) {
+            const baseMs = options?.createdAt ? Date.parse(options.createdAt) : NaN;
+            pushChatMessage({
+                sessionId,
+                role: "assistant",
+                content: shortcutMarker.text,
+                createdAt: Number.isFinite(baseMs) ? new Date(baseMs + 1).toISOString() : undefined,
+                mediaType: "tool_call",
+                responseBatchId,
+                senderCharacterId: options?.senderCharacterId,
+                senderName: options?.senderName,
+            });
+            pushChatMessage({
+                sessionId,
+                role: "system",
+                content: `发出快捷动作「${shortcutMarker.name}」`,
+                createdAt: Number.isFinite(baseMs) ? new Date(baseMs + 2).toISOString() : undefined,
+                mediaType: "tool_notice",
             });
         }
         // Emit call trigger event for chat-room to pick up
@@ -974,12 +1025,38 @@ export async function parseAndSaveResponse(
         filteredParts.push({ content: "" });
         metaIdx = filteredParts.length - 1;
     }
-    for (let i = 0; i < filteredParts.length; i++) {
-        const generatedPart = buildGeneratedFollowUpImageMessage(filteredParts[i]);
+    const markerPartIdx = findShortcutMarkerPartIdx(filteredParts);
+    // 时间戳按落库顺序递增（配对消息插在中间时也保持因果顺序）
+    let timeSeq = 0;
+    const nextCreatedAt = (): string | undefined => {
         const sourceCreatedAt = options?.createdAt ? Date.parse(options.createdAt) : NaN;
-        const createdAt = Number.isFinite(sourceCreatedAt)
-            ? new Date(sourceCreatedAt + i).toISOString()
-            : undefined;
+        const seq = timeSeq++;
+        return Number.isFinite(sourceCreatedAt) ? new Date(sourceCreatedAt + seq).toISOString() : undefined;
+    };
+    const saveShortcutMarkerPair = () => {
+        if (!shortcutMarker) return;
+        savedMessages.push(pushChatMessage({
+            sessionId,
+            role: "assistant",
+            content: shortcutMarker.text,
+            createdAt: nextCreatedAt(),
+            mediaType: "tool_call",
+            responseBatchId,
+            senderCharacterId: options?.senderCharacterId,
+            senderName: options?.senderName,
+        }));
+        savedMessages.push(pushChatMessage({
+            sessionId,
+            role: "system",
+            content: `发出快捷动作「${shortcutMarker.name}」`,
+            createdAt: nextCreatedAt(),
+            mediaType: "tool_notice",
+        }));
+    };
+    for (let i = 0; i < filteredParts.length; i++) {
+        if (i === markerPartIdx) saveShortcutMarkerPair();
+        const generatedPart = buildGeneratedFollowUpImageMessage(filteredParts[i]);
+        const createdAt = nextCreatedAt();
         const saved = pushChatMessage({
             sessionId,
             role: "assistant",
@@ -991,6 +1068,7 @@ export async function parseAndSaveResponse(
             responseBatchId,
             rawResponseText,
             statusPanel: i === metaIdx && statusPanel ? statusPanel : undefined,
+            statusRegionMode: i === metaIdx && statusPanel ? statusRegionMode : undefined,
             innerMonologue: i === metaIdx && innerMonologue ? innerMonologue : undefined,
             reasoningText: i === metaIdx ? reasoningText : undefined,
             stateValues: i === metaIdx && stateValues.length > 0 ? stateValues : undefined,
@@ -1010,6 +1088,7 @@ export async function parseAndSaveResponse(
         }
         savedMessages.push(saved);
     }
+    if (markerPartIdx >= filteredParts.length) saveShortcutMarkerPair();
 
     await dispatchBackgroundMessagesOneByOne(sessionId, savedMessages, options?.silent === true);
     if (imageReplacementTasks.length > 0) {
