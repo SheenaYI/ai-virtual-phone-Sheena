@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { ArrowLeft, ArrowRight, Clock, EyeOff, Play, Pause, Volume2, Eye, ChevronDown, Send, MessageSquare, BookOpen, Archive, MapPin, RotateCcw, ListOrdered, Plus, Trash2, ChevronRight, Loader2 } from "lucide-react";
+import { ArrowLeft, ArrowRight, Clock, EyeOff, Play, Pause, Volume2, Eye, ChevronDown, Send, MessageSquare, BookOpen, Archive, MapPin, RotateCcw, ListOrdered, Plus, Trash2, ChevronRight, ChevronsDown, Loader2 } from "lucide-react";
 import { BilingualTextBlock } from "@/components/chat/message-bubble";
 import {
   createOrGetVnSession,
@@ -125,6 +125,7 @@ export function VnPlayer({ characterId, chapterIndex, onClose, onChapterEnd, vnT
   const [voiceBusyKey, setVoiceBusyKey] = useState<string | null>(null);
   const [voicePlayingKey, setVoicePlayingKey] = useState<string | null>(null);
   const longPressTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const longPressTriggeredRef = useRef(false);
 
   const typingRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const autoRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -886,6 +887,46 @@ export function VnPlayer({ characterId, chapterIndex, onClose, onChapterEnd, vnT
     }
   }, [session.id, chapterIndex, characterId, rebuildFrames, startTyping, getTypingSourceText]);
 
+  // ── 回顾面板：跳转到指定帧（点历史消息 / 回到最新共用）──
+  // 退出回放与自动播放、清掉残留打字定时器，按目标帧向前累计出该位置的
+  // 场景/立绘状态，然后关闭面板并从那帧开始打字显示。
+  const applyJumpToFrame = useCallback((idx: number) => {
+    setHistoryOpen(false);
+    setCtxMenuMsgId(null);
+    if (idx < 0 || idx >= allFrames.length) {
+      setWaitingForInput(true);
+      return;
+    }
+    if (isReplaying) { setIsReplaying(false); setReplayFrames([]); setReplayIdx(0); }
+    if (typingRef.current) { clearTimeout(typingRef.current); typingRef.current = null; }
+    setAutoMode(false);
+    let bg = "", sp = "";
+    for (let i = 0; i <= idx; i++) {
+      if (allFrames[i].bg) bg = allFrames[i].bg;
+      if (allFrames[i].sprite) sp = allFrames[i].sprite;
+    }
+    setWaitingForInput(false);
+    if (bg) setCurrentScene(bg);
+    if (sp) setCurrentSprite(sp);
+    setFrameIdx(idx);
+    startTyping(getTypingSourceText(allFrames[idx]));
+  }, [allFrames, isReplaying, getTypingSourceText, startTyping]);
+
+  // A. 点历史消息 → 跳到该消息对应的那一轮（取该消息第一条有文本的帧）
+  const handleHistoryJump = useCallback((msgId: string) => {
+    let idx = allFrames.findIndex((f) => f.sourceMessageId === msgId && f.text);
+    if (idx === -1) idx = allFrames.findIndex((f) => f.sourceMessageId === msgId);
+    if (idx === -1) return;
+    applyJumpToFrame(idx);
+  }, [allFrames, applyJumpToFrame]);
+
+  // B. 回到最新 → 跳到章节末尾最后一帧（空章节则进入输入框）
+  const handleJumpToLatest = useCallback(() => {
+    let idx = allFrames.length - 1;
+    while (idx >= 0 && !allFrames[idx].text) idx--;
+    applyJumpToFrame(idx);
+  }, [allFrames, applyJumpToFrame]);
+
   const longPressYRef = useRef(0);
   const longPressXRef = useRef(0);
   const vnShellRef = useRef<HTMLDivElement>(null);
@@ -893,7 +934,7 @@ export function VnPlayer({ characterId, chapterIndex, onClose, onChapterEnd, vnT
     if (longPressTimer.current) clearTimeout(longPressTimer.current);
     longPressXRef.current = x;
     longPressYRef.current = y;
-    longPressTimer.current = setTimeout(() => { setCtxMenuMsgId(msgId); setCtxMenuX(longPressXRef.current); setCtxMenuY(longPressYRef.current); longPressTimer.current = null; }, 500);
+    longPressTimer.current = setTimeout(() => { longPressTriggeredRef.current = true; setCtxMenuMsgId(msgId); setCtxMenuX(longPressXRef.current); setCtxMenuY(longPressYRef.current); longPressTimer.current = null; }, 500);
   }, []);
 
   const handleMsgLongPressEnd = useCallback(() => {
@@ -1217,6 +1258,9 @@ export function VnPlayer({ characterId, chapterIndex, onClose, onChapterEnd, vnT
             <button className="vn-history-close" onClick={() => setHistoryOpen(false)}>
               <ArrowRight size={16} />
             </button>
+            <button className="vn-history-close" style={{ left: 58 }} onClick={handleJumpToLatest} title="回到最新">
+              <ChevronsDown size={16} />
+            </button>
             {historyMessages.map((msg) => {
               const roleLabel = msg.role === "user" ? "用户" : msg.role === "assistant" ? "AI" : "系统";
               // Parse for display preview
@@ -1232,6 +1276,12 @@ export function VnPlayer({ characterId, chapterIndex, onClose, onChapterEnd, vnT
                   onPointerUp={handleMsgLongPressEnd}
                   onPointerLeave={handleMsgLongPressEnd}
                   onContextMenu={(e) => { e.preventDefault(); setCtxMenuX(e.clientX); setCtxMenuY(e.clientY); setCtxMenuMsgId(msg.id); }}
+                  onClick={() => {
+                    // 长按弹过菜单后的松手 click 不触发跳转
+                    if (longPressTriggeredRef.current) { longPressTriggeredRef.current = false; return; }
+                    if (editingMsgId === msg.id) return;
+                    handleHistoryJump(msg.id);
+                  }}
                 >
                   <div className="vn-history-msg-role">{roleLabel}</div>
                   {editingMsgId === msg.id ? (

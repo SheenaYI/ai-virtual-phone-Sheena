@@ -494,7 +494,10 @@
           padding: 10px 0;
           border-bottom: 1px solid var(--vn-ui-input);
           position: relative;
+          cursor: pointer;
+          border-radius: 4px;
         }
+        .vn-history-msg:active { background: var(--vn-ui-input); }
         .vn-history-msg[data-role="user"] { padding-left: 8px; border-left: 2px solid var(--vn-ui-success); }
         .vn-history-msg[data-role="assistant"] { padding-left: 8px; border-left: 2px solid var(--vn-ui-accent-dim); }
         .vn-history-msg-role {
