@@ -887,7 +887,7 @@ export function VnPlayer({ characterId, chapterIndex, onClose, onChapterEnd, vnT
     }
   }, [session.id, chapterIndex, characterId, rebuildFrames, startTyping, getTypingSourceText]);
 
-  // ── 回顾面板：跳转到指定帧（点历史消息 / 回到最新共用）──
+  // ── 回顾面板：跳转到指定帧（点历史消息跳播放用）──
   // 退出回放与自动播放、清掉残留打字定时器，按目标帧向前累计出该位置的
   // 场景/立绘状态，然后关闭面板并从那帧开始打字显示。
   const applyJumpToFrame = useCallback((idx: number) => {
@@ -920,12 +920,15 @@ export function VnPlayer({ characterId, chapterIndex, onClose, onChapterEnd, vnT
     applyJumpToFrame(idx);
   }, [allFrames, applyJumpToFrame]);
 
-  // B. 回到最新 → 跳到章节末尾最后一帧（空章节则进入输入框）
+  // B. 回到最新 → 把回顾面板滚动到最底部（最新一条消息），面板保持打开
+  const historyPanelRef = useRef<HTMLDivElement>(null);
   const handleJumpToLatest = useCallback(() => {
-    let idx = allFrames.length - 1;
-    while (idx >= 0 && !allFrames[idx].text) idx--;
-    applyJumpToFrame(idx);
-  }, [allFrames, applyJumpToFrame]);
+    const panel = historyPanelRef.current;
+    if (!panel) return;
+    requestAnimationFrame(() => {
+      panel.scrollTo({ top: panel.scrollHeight, behavior: "smooth" });
+    });
+  }, []);
 
   const longPressYRef = useRef(0);
   const longPressXRef = useRef(0);
@@ -1254,11 +1257,11 @@ export function VnPlayer({ characterId, chapterIndex, onClose, onChapterEnd, vnT
       {/* ── History Panel (message-level) ── */}
       {historyOpen && (
         <div className="vn-history-overlay" onClick={() => { setHistoryOpen(false); setCtxMenuMsgId(null); }}>
-          <div className="vn-history-panel" onClick={(e) => { e.stopPropagation(); setCtxMenuMsgId(null); }}>
+          <div ref={historyPanelRef} className="vn-history-panel" onClick={(e) => { e.stopPropagation(); setCtxMenuMsgId(null); }}>
             <button className="vn-history-close" onClick={() => setHistoryOpen(false)}>
               <ArrowRight size={16} />
             </button>
-            <button className="vn-history-close" style={{ left: 58 }} onClick={handleJumpToLatest} title="回到最新">
+            <button className="vn-history-close" style={{ left: 58 }} onClick={handleJumpToLatest} title="最新消息">
               <ChevronsDown size={16} />
             </button>
             {historyMessages.map((msg) => {
