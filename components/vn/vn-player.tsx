@@ -844,6 +844,48 @@ export function VnPlayer({ characterId, chapterIndex, onClose, onChapterEnd, vnT
     }
   }, [session.id, chapterIndex, characterId, rebuildFrames, startTyping, getTypingSourceText]);
 
+  // 用户消息「重新生成」：保留这条用户发言本身，删除它之后的所有消息
+  // （含更晚章节），让 AI 以这句发言为最后输入重新生成回复 —— 即从此处分叉剧情。
+  const handleMsgRegenerate = useCallback(async (msgId: string) => {
+    const msgs = loadVnMessagesForChapter(session.id, chapterIndex);
+    const msgIdx = msgs.findIndex((m) => m.id === msgId);
+    if (msgIdx === -1 || msgs[msgIdx].role !== "user") return;
+    const nextMsg = msgs[msgIdx + 1];
+    if (nextMsg) {
+      deleteVnMessagesFrom(session.id, nextMsg.id);
+    }
+    setCtxMenuMsgId(null);
+    setHistoryOpen(false);
+    rebuildFrames();
+    setIsGenerating(true);
+    setWaitingForInput(false);
+    try {
+      const allMessages = loadVnMessages(session.id);
+      const result = await generateVnCompletion(characterId, allMessages);
+      const aiMsg = pushVnMessage({ sessionId: session.id, role: "assistant", rawContent: result.rawText, chapterIndex, roundSummary: result.summaryText });
+      rebuildFrames();
+      // Play new AI frames
+      const newMsgs = loadVnMessagesForChapter(session.id, chapterIndex);
+      const { frames } = buildFramesFromMessages(newMsgs);
+      setAllFrames(frames);
+      setCurrentOptions(result.options);
+      const aiFrames = tagFramesWithMessage(result.frames, aiMsg);
+      if (aiFrames.length > 0) {
+        const startIdx = frames.length - aiFrames.length;
+        setFrameIdx(startIdx);
+        const f = aiFrames[0];
+        if (f.bg) setCurrentScene(f.bg);
+        if (f.sprite) setCurrentSprite(f.sprite);
+        startTyping(getTypingSourceText(f));
+      }
+    } catch (err) {
+      console.error("VN regenerate error:", err);
+      setWaitingForInput(true);
+    } finally {
+      setIsGenerating(false);
+    }
+  }, [session.id, chapterIndex, characterId, rebuildFrames, startTyping, getTypingSourceText]);
+
   const longPressYRef = useRef(0);
   const longPressXRef = useRef(0);
   const vnShellRef = useRef<HTMLDivElement>(null);
@@ -1230,6 +1272,9 @@ export function VnPlayer({ characterId, chapterIndex, onClose, onChapterEnd, vnT
                         <button className="vn-ctx-btn" onClick={() => handleMsgEditStart(msg)}>编辑</button>
                         {msg.role === "assistant" && (
                           <button className="vn-ctx-btn vn-ctx-btn-danger" onClick={() => handleMsgRetry(msg.id)}>重试</button>
+                        )}
+                        {msg.role === "user" && (
+                          <button className="vn-ctx-btn vn-ctx-btn-danger" onClick={() => handleMsgRegenerate(msg.id)}>重新生成</button>
                         )}
                         <button className="vn-ctx-btn vn-ctx-btn-danger" onClick={() => handleMsgDelete(msg.id)}>删除</button>
                         <button className="vn-ctx-btn vn-ctx-btn-danger" onClick={() => handleMsgDeleteFrom(msg.id)}>删除以下</button>
