@@ -47,6 +47,12 @@ function getVnSessionActivityTime(session: VnSession): number {
 }
 
 function isPreferredVnSession(candidate: VnSession, current: VnSession): boolean {
+  // 章节数优先：空壳会话（chapters 为空）绝不能顶掉有内容的存档。
+  // 空壳通常来自水合完成前 createOrGetVnSession 抢先新建的那一个——它的
+  // updatedAt 是「刚刚」，活跃时间天然更高，只比时间它必赢，真存档随之被清。
+  const candidateChapters = candidate.chapters?.length ?? 0;
+  const currentChapters = current.chapters?.length ?? 0;
+  if (candidateChapters !== currentChapters) return candidateChapters > currentChapters;
   const candidateTime = getVnSessionActivityTime(candidate);
   const currentTime = getVnSessionActivityTime(current);
   if (candidateTime !== currentTime) return candidateTime > currentTime;
@@ -88,19 +94,35 @@ function normalizeVnSessions(sessions: VnSession[]): { items: VnSession[]; chang
   return { items: normalized, changed };
 }
 
+/**
+ * 落盘会话快照。只按 id 精确删除被淘汰的行，绝不再 clear() 整表——
+ * 原来「清空 + 重写」的写法一旦快照算错，就是整张会话表（章节、总结）永久蒸发。
+ */
 function persistVnSessionsSnapshot(sessions: VnSession[]): void {
+  const keep = new Set(sessions.map((row) => row.id));
   vnDb.transaction("rw", vnDb.sessions, async () => {
-    await vnDb.sessions.clear();
+    const existing = await vnDb.sessions.toArray();
+    const stale = existing.filter((row) => !keep.has(row.id)).map((row) => row.id);
+    if (stale.length > 0) await vnDb.sessions.bulkDelete(stale);
     await vnDb.sessions.bulkPut(sessions);
   }).catch(() => undefined);
 }
 
 export async function hydrateVnStorage(): Promise<void> {
   if (_hydrated || typeof window === "undefined") return;
-  const [sessions, messages] = await Promise.all([
-    vnDb.sessions.toArray().catch(() => []),
-    vnDb.messages.toArray().catch(() => []),
-  ]);
+  let sessions: VnSession[];
+  let messages: VnMessage[];
+  try {
+    [sessions, messages] = await Promise.all([
+      vnDb.sessions.toArray(),
+      vnDb.messages.toArray(),
+    ]);
+  } catch {
+    // 读失败绝不标记已水合：保持未水合，下次调用重试。
+    // 以前用 .catch(() => []) 把失败吞成空数组，空数组会被当成事实写回库里，
+    // 于是「读不到」直接变成「数据被清空」——这是最危险的一条。
+    return;
+  }
   _messagesCache = messages;
   const normalized = normalizeVnSessions(sessions);
   _sessionsCache = normalized.items;
