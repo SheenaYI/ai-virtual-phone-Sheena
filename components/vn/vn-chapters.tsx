@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ArrowLeft, Plus, BookOpen, Trash2 } from "lucide-react";
+import { ArrowLeft, Plus, BookOpen, Trash2, RotateCcw } from "lucide-react";
 import { loadCharacters } from "@/lib/character-storage";
 import {
   createOrGetVnSession,
@@ -9,6 +9,9 @@ import {
   updateChapterSummary,
   clearChapterSummary,
   loadVnMessagesForChapter,
+  listOrphanVnMessageGroups,
+  restoreOrphanVnMessages,
+  type VnOrphanMessageGroup,
 } from "@/lib/vn-storage";
 import { summarizeVnChapter } from "@/lib/vn-engine";
 
@@ -31,6 +34,10 @@ export function VnChapters({ characterId, onClose, onSelect, vnTheme }: VnChapte
   const [, forceUpdate] = useState(0);
   const [summarizing, setSummarizing] = useState<number | null>(null);
   const [confirmClearSummaryIndex, setConfirmClearSummaryIndex] = useState<number | null>(null);
+  // 无主剧情（会话行丢失后剩下的消息）恢复
+  const [orphanGroups, setOrphanGroups] = useState<VnOrphanMessageGroup[]>([]);
+  const [restoringSessionId, setRestoringSessionId] = useState<string | null>(null);
+  const [restoreError, setRestoreError] = useState<string | null>(null);
 
   const character = useMemo(() => {
     return loadCharacters().find((c) => c.id === characterId);
@@ -40,13 +47,23 @@ export function VnChapters({ characterId, onClose, onSelect, vnTheme }: VnChapte
     return createOrGetVnSession(characterId);
   }, [characterId]);
 
-  const chapters = session.chapters;
+  // 章节实时取自存储：恢复无主剧情等操作会替换缓存里的会话对象，
+  // 沿用 useMemo 里的旧引用会让星空页继续停在恢复前的空章节上。
+  const chapters = createOrGetVnSession(characterId).chapters;
 
   useEffect(() => {
     const el = scrollRef.current;
     if (el) el.scrollTop = el.scrollHeight;
     setTimeout(() => setMounted(true), 100);
   }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    void listOrphanVnMessageGroups()
+      .then((groups) => { if (!cancelled) setOrphanGroups(groups); })
+      .catch(() => { /* 诊断失败不打扰用户 */ });
+    return () => { cancelled = true; };
+  }, [characterId]);
 
   const lastChapter = chapters.length > 0 ? chapters[chapters.length - 1] : null;
   const canCreateNewChapter = !lastChapter || lastChapter.archived;
@@ -80,6 +97,25 @@ export function VnChapters({ characterId, onClose, onSelect, vnTheme }: VnChapte
     setConfirmClearSummaryIndex(null);
     forceUpdate((n) => n + 1);
   }, [session.id]);
+
+  const handleRestoreOrphans = useCallback(async (group: VnOrphanMessageGroup) => {
+    setRestoreError(null);
+    setRestoringSessionId(group.sessionId);
+    try {
+      const result = await restoreOrphanVnMessages(group.sessionId, characterId);
+      if (!result) {
+        setRestoreError("没找到可恢复的消息，可能已被清理。");
+        return;
+      }
+      setOrphanGroups((prev) => prev.filter((item) => item.sessionId !== group.sessionId));
+      forceUpdate((n) => n + 1);
+    } catch (err) {
+      console.error("VN restore orphan messages failed:", err);
+      setRestoreError(err instanceof Error ? err.message : "恢复失败，请重试。");
+    } finally {
+      setRestoringSessionId(null);
+    }
+  }, [characterId]);
 
   const nodeSpacing = 120;
   const totalHeight = (chapters.length + 1) * nodeSpacing + 200;
@@ -357,6 +393,39 @@ export function VnChapters({ characterId, onClose, onSelect, vnTheme }: VnChapte
           margin-top: 2px;
         }
 
+        /* ── 无主剧情恢复提示 ── */
+        .vnc-recover {
+          position: relative; z-index: 9;
+          margin: 0 16px 10px;
+          padding: 12px;
+          border-radius: 12px;
+          border: 1px solid var(--vn-ui-border);
+          background: var(--vn-ui-input);
+          display: flex; flex-direction: column; gap: 8px;
+        }
+        .vnc-recover-text {
+          font-size: calc(11px*var(--app-text-scale,1));
+          color: var(--vn-ui-text-dim);
+          line-height: 1.6;
+        }
+        .vnc-recover-btn {
+          display: flex; align-items: center; justify-content: center; gap: 6px;
+          padding: 9px 10px; border-radius: 8px;
+          border: 1px solid var(--vn-ui-border);
+          background: var(--vn-ui-accent-bg);
+          color: var(--vn-ui-text);
+          font-size: calc(12px*var(--app-text-scale,1));
+          font-family: inherit; cursor: pointer; line-height: 1.4;
+        }
+        .vnc-recover-btn:active { transform: scale(0.98); }
+        .vnc-recover-btn:disabled { opacity: 0.5; }
+        .vnc-recover-spin { animation: vnc-spin 1s linear infinite; }
+        .vnc-recover-error {
+          font-size: calc(11px*var(--app-text-scale,1));
+          color: #ff6b6b;
+          line-height: 1.5;
+        }
+
         /* ── 清除章节记忆确认弹层 ── */
         .vnc-confirm-overlay {
           position: absolute; inset: 0; z-index: 60;
@@ -409,6 +478,31 @@ export function VnChapters({ characterId, onClose, onSelect, vnTheme }: VnChapte
         </div>
         <div style={{ width: 40 }} />
       </div>
+
+      {/* ── 无主剧情恢复 ── */}
+      {orphanGroups.length > 0 && (
+        <div className="vnc-recover">
+          <div className="vnc-recover-text">
+            发现 {orphanGroups.reduce((sum, item) => sum + item.messageCount, 0)} 条没有归属的剧情消息，
+            可以挂回该角色（正文、选项与每轮总结完整保留，章节标题会退回「第N章」）。
+          </div>
+          {orphanGroups.map((group) => (
+            <button
+              key={group.sessionId}
+              type="button"
+              className="vnc-recover-btn"
+              disabled={restoringSessionId !== null}
+              onClick={() => void handleRestoreOrphans(group)}
+            >
+              <RotateCcw size={12} className={restoringSessionId === group.sessionId ? "vnc-recover-spin" : undefined} />
+              {restoringSessionId === group.sessionId
+                ? "恢复中…"
+                : `恢复 ${group.messageCount} 条 · ${group.chapterCount} 章（${formatOrphanRange(group.firstAt, group.lastAt)}）`}
+            </button>
+          ))}
+          {restoreError && <div className="vnc-recover-error">{restoreError}</div>}
+        </div>
+      )}
 
       {/* ── Scrollable Star Map ── */}
       <div className="vnc-scroll" ref={scrollRef}>
@@ -510,6 +604,19 @@ export function VnChapters({ characterId, onClose, onSelect, vnTheme }: VnChapte
 
     </div>
   );
+}
+
+/** 无主剧情的日期范围，用短格式免得撑破按钮宽度。 */
+function formatOrphanRange(firstAt: string, lastAt: string): string {
+  const fmt = (value: string) => {
+    const ms = Date.parse(value);
+    if (!Number.isFinite(ms)) return "时间未知";
+    const date = new Date(ms);
+    return `${date.getMonth() + 1}/${date.getDate()}`;
+  };
+  const start = fmt(firstAt);
+  const end = fmt(lastAt);
+  return start === end ? start : `${start}~${end}`;
 }
 
 function numberToChinese(n: number): string {

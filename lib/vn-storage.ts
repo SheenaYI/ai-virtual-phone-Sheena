@@ -469,6 +469,121 @@ export function updateChapterStartMessageId(
   updateVnSession(sessionId, { chapters });
 }
 
+// ── 无主剧情：会话行丢失后残留在 messages 表里的消息 ──
+// 会话行一旦被误删，这些消息还带着已不存在的 sessionId：漫卷按当前会话 id 查不到，
+// 表现就是星空页空白、没有对白。下面两个函数先把它们找出来，再合并回该角色的会话
+// （重写 sessionId、chapterIndex 整体后移接在现有章节之后，正文一个字不动）。
+
+export type VnOrphanMessageGroup = {
+  sessionId: string;
+  messageCount: number;
+  chapterCount: number;
+  firstAt: string;
+  lastAt: string;
+  audioFrames: number;
+};
+
+function vnChapterTitle(index: number): string {
+  const digits = ["零", "一", "二", "三", "四", "五", "六", "七", "八", "九", "十"];
+  const n = index + 1;
+  if (n <= 10) return `第${digits[n]}章`;
+  if (n < 20) return `第十${digits[n - 10]}章`;
+  const tens = Math.floor(n / 10);
+  const ones = n % 10;
+  return `第${digits[tens]}十${ones ? digits[ones] : ""}章`;
+}
+
+/** 列出「有消息但没有对应会话行」的 sessionId 分组（只读，不改数据）。 */
+export async function listOrphanVnMessageGroups(): Promise<VnOrphanMessageGroup[]> {
+  await hydrateVnStorage();
+  const known = new Set(_sessionsCache.map((s) => s.id));
+  const bySession = new Map<string, VnMessage[]>();
+  for (const message of _messagesCache) {
+    if (known.has(message.sessionId)) continue;
+    const list = bySession.get(message.sessionId);
+    if (list) list.push(message);
+    else bySession.set(message.sessionId, [message]);
+  }
+
+  const groups: VnOrphanMessageGroup[] = [];
+  for (const [sessionId, messages] of bySession) {
+    messages.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+    let audioFrames = 0;
+    for (const message of messages) {
+      if (!message.frameAudio) continue;
+      for (const item of Object.values(message.frameAudio)) {
+        if (item?.audioDataUrl) audioFrames += 1;
+      }
+    }
+    groups.push({
+      sessionId,
+      messageCount: messages.length,
+      chapterCount: new Set(messages.map((m) => m.chapterIndex)).size,
+      firstAt: messages[0]?.createdAt ?? "",
+      lastAt: messages[messages.length - 1]?.createdAt ?? "",
+      audioFrames,
+    });
+  }
+  return groups.sort((a, b) => b.messageCount - a.messageCount);
+}
+
+/**
+ * 把一组无主消息合并回指定角色的会话。只改每条消息的 sessionId 与 chapterIndex，
+ * 正文、选项、轮次总结、配音全部原样保留；章节骨架按 chapterIndex 重建，
+ * 标题退回「第N章」（原标题与章节总结存在已丢失的会话行里，无法找回）。
+ */
+export async function restoreOrphanVnMessages(
+  sessionId: string,
+  characterId: string,
+): Promise<{ chapters: number; messages: number } | null> {
+  await hydrateVnStorage();
+  const orphans = _messagesCache
+    .filter((m) => m.sessionId === sessionId)
+    .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+  if (orphans.length === 0) return null;
+
+  const session = createOrGetVnSession(characterId);
+  const distinct = Array.from(new Set(orphans.map((m) => m.chapterIndex))).sort((a, b) => a - b);
+  // 整体后移，接在现有章节之后，避免与当前会话已有章节的 index 撞车
+  const offset = session.chapters.length - distinct[0];
+
+  const rewritten: VnMessage[] = [];
+  for (const message of orphans) {
+    const next: VnMessage = {
+      ...message,
+      sessionId: session.id,
+      chapterIndex: message.chapterIndex + offset,
+    };
+    const idx = _messagesCache.findIndex((m) => m.id === message.id);
+    if (idx !== -1) _messagesCache[idx] = next;
+    rewritten.push(next);
+  }
+
+  const chapters = [...session.chapters];
+  const lastNewIndex = distinct[distinct.length - 1] + offset;
+  for (const oldIndex of distinct) {
+    const newIndex = oldIndex + offset;
+    if (chapters[newIndex]) continue;
+    chapters[newIndex] = {
+      id: generateId("vn_ch"),
+      index: newIndex,
+      title: vnChapterTitle(newIndex),
+      startMessageId: "",
+      // 除最后一章外一律标为已归档，与正常流程一致（否则章节页无法新建下一章）
+      archived: newIndex < lastNewIndex,
+    };
+  }
+  for (const chapter of chapters) {
+    if (chapter.startMessageId) continue;
+    const first = rewritten.find((m) => m.chapterIndex === chapter.index);
+    if (first) chapter.startMessageId = first.id;
+  }
+
+  updateVnSession(session.id, { chapters, activeChapterIndex: Math.max(0, chapters.length - 1) });
+  await vnDb.messages.bulkPut(rewritten).catch(() => undefined);
+  return { chapters: distinct.length, messages: rewritten.length };
+}
+
 export type VnProjectionEntry = {
   id: string;
   timestamp: string;
