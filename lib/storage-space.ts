@@ -26,6 +26,7 @@ import { hydrateMomentsStorage, updateMomentPost } from "./moments-storage";
 import { deleteTrack, getAudioBlob, loadAllTracks } from "./music-storage";
 import { deleteRawFile, hydrateReadingStorage, listRawFileSummaries, loadBooks } from "./reading-storage";
 import { loadXiaohongshuState, saveXiaohongshuState } from "./xiaohongshu-storage";
+import { clearVnFrameAudio, scanVnFrameAudio } from "./vn-storage";
 
 /**
  * 「存储空间」引擎：把本机占用按用户能看懂的内容类别统计出来，并支持
@@ -43,6 +44,7 @@ export type StorageCategoryId =
   | "chat_images"
   | "chat_voice"
   | "chat_media_files"
+  | "vn_voice"
   | "moments_images"
   | "xiaohongshu_images"
   | "local_music"
@@ -84,6 +86,11 @@ const CATEGORY_META: Record<StorageCategoryId, { label: string; description: str
   chat_media_files: {
     label: "聊天视频与文件",
     description: "聊天里收发的视频和其他文件。清理后无法再打开。",
+    supportsKeepDays: true,
+  },
+  vn_voice: {
+    label: "漫卷配音",
+    description: "漫卷播放时合成过的帧配音。清理后剧情文字与画面保留，需要时点该帧的喇叭可重新合成。",
     supportsKeepDays: true,
   },
   moments_images: {
@@ -290,6 +297,10 @@ export async function scanStorageSpace(onProgress?: (detail: string) => void): P
     deletableRawFiles.reduce((sum, item) => sum + item.bytes, 0),
     deletableRawFiles.length,
   ));
+
+  onProgress?.("统计漫卷配音…");
+  const vnAudio = await scanVnFrameAudio().catch(() => ({ bytes: 0, count: 0 }));
+  stats.push(makeStat("vn_voice", vnAudio.bytes, vnAudio.count));
 
   onProgress?.("扫描残留媒体（全库引用检查，需要一点时间）…");
   const orphans = await collectOrphanMedia().catch(() => []);
@@ -516,6 +527,7 @@ export async function clearStorageCategory(
     case "chat_images": return clearChatCategory("image", options.keepDays);
     case "chat_voice": return clearChatCategory("voice", options.keepDays);
     case "chat_media_files": return clearChatCategory("file", options.keepDays);
+    case "vn_voice": return clearVnFrameAudio({ keepDays: options.keepDays });
     case "moments_images": return clearMomentsImages(options.keepDays);
     case "xiaohongshu_images": return clearXiaohongshuImages(options.keepDays);
     case "local_music": return clearLocalMusic(options.keepDays);

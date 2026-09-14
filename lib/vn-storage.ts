@@ -1,5 +1,6 @@
 import Dexie from "dexie";
 import { formatChatTimestamp } from "./llm-prompt-assembler";
+import { estimateValueBytes } from "./data-management/serializers";
 import type { VnSession, VnMessage, VnChapterMeta, VnLayoutPrefs, VnBeat, VnFrameAudio } from "./vn-types";
 export type { VnSession, VnMessage, VnChapterMeta, VnLayoutPrefs, VnBeat };
 
@@ -180,6 +181,87 @@ export function deleteVnMessagesFrom(sessionId: string, messageId: string): void
     .map((m) => m.id);
   _messagesCache = _messagesCache.filter((m) => !idsToDelete.includes(m.id));
   vnDb.messages.bulkDelete(idsToDelete).catch(() => undefined);
+}
+
+// ── 漫卷配音（frameAudio）占用统计与清理 ──
+// 每帧配音以 base64 data URL 直接存在消息的 frameAudio 里（VnFrameAudio.audioDataUrl），
+// 合成过一次就跟着那条消息常驻，不会自动回收。统计必须游标逐条扫：单条音频动辄
+// 数百 KB，把整张消息表再 toArray() 一份进内存会让重度用户进存储页即 OOM。
+
+/** 帧配音是否早于清理截止线。无时间戳按最旧算，语义与存储空间其它类别一致。 */
+function frameAudioBeforeCutoff(iso: string | undefined, cutoff: number): boolean {
+  if (cutoff === Number.POSITIVE_INFINITY) return true;
+  if (!iso) return true;
+  const parsed = Date.parse(iso);
+  return !Number.isFinite(parsed) || parsed < cutoff;
+}
+
+/** 统计漫卷配音的总占用与帧数（只读，不改数据）。 */
+export async function scanVnFrameAudio(): Promise<{ bytes: number; count: number }> {
+  let bytes = 0;
+  let count = 0;
+  await vnDb.messages.each((message) => {
+    const audio = message.frameAudio;
+    if (!audio) return;
+    for (const item of Object.values(audio)) {
+      if (!item?.audioDataUrl) continue;
+      bytes += estimateValueBytes(item.audioDataUrl);
+      count += 1;
+    }
+  }).catch(() => undefined);
+  return { bytes, count };
+}
+
+/**
+ * 清理漫卷配音：只摘掉超期的 frameAudio 字段，剧情正文、章节、总结与场景立绘
+ * 一律保留；需要时重新点该帧的喇叭即可再次合成（会重新消耗 TTS 额度）。
+ * 时间基准用音频自身的 updatedAt（合成时间），缺失时退回消息 createdAt。
+ */
+export async function clearVnFrameAudio(
+  options: { keepDays?: number } = {},
+): Promise<{ cleared: number; freedBytes: number }> {
+  const keepDays = options.keepDays;
+  // 无有效天数 = 全部清理（与 storage-space 的 cutoffMs 同义）
+  const cutoff = !keepDays || keepDays <= 0
+    ? Number.POSITIVE_INFINITY
+    : Date.now() - keepDays * 24 * 60 * 60 * 1000;
+  // 先确保内存缓存已水合：否则水合快照可能晚于这次写库，把刚删掉的配音又覆盖回缓存
+  await hydrateVnStorage();
+  let cleared = 0;
+  let freedBytes = 0;
+  const updates: VnMessage[] = [];
+
+  await vnDb.messages.each((message) => {
+    if (!message.frameAudio) return;
+    const kept: Record<number, VnFrameAudio> = {};
+    let removed = 0;
+    let removedBytes = 0;
+    for (const [key, item] of Object.entries(message.frameAudio)) {
+      const stamp = item?.updatedAt || message.createdAt;
+      if (frameAudioBeforeCutoff(stamp, cutoff)) {
+        removed += 1;
+        if (item?.audioDataUrl) removedBytes += estimateValueBytes(item.audioDataUrl);
+        continue;
+      }
+      kept[Number(key)] = item;
+    }
+    if (removed === 0) return;
+
+    const next: VnMessage = { ...message };
+    if (Object.keys(kept).length > 0) next.frameAudio = kept;
+    else delete next.frameAudio;
+
+    // 同步内存缓存：漫卷读的是 _messagesCache，只写 Dexie 会出现「清完又回来」
+    const cacheIdx = _messagesCache.findIndex((m) => m.id === message.id);
+    if (cacheIdx !== -1) _messagesCache[cacheIdx] = next;
+
+    updates.push(next);
+    cleared += removed;
+    freedBytes += removedBytes;
+  }).catch(() => undefined);
+
+  if (updates.length > 0) await vnDb.messages.bulkPut(updates).catch(() => undefined);
+  return { cleared, freedBytes };
 }
 
 export function editVnMessage(messageId: string, newRawContent: string): void {
