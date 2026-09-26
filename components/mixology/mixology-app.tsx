@@ -29,7 +29,7 @@ import {
     saveMixRecipe,
     type MixProfile,
 } from "@/lib/mixology/storage";
-import { runMixSessionStart, startMixSession } from "@/lib/mixology/engine";
+import { mixRoundCount, runMixSessionStart, startMixSession } from "@/lib/mixology/engine";
 import { disposeMixSandboxesForMaterial } from "@/lib/mixology/mechanism-runtime";
 import { mixKindRunsActiveCode } from "@/lib/mixology/types";
 import {
@@ -330,22 +330,35 @@ export function MixologyApp({ onClose }: { onClose: () => void }) {
                 return;
             }
             const keep = editor.initial;
-            setEditor({
-                kind: editor.kind,
-                initial: keep
-                    ? {
-                        ...picked,
-                        id: keep.id,
-                        createdAt: keep.createdAt,
-                        publishedId: keep.publishedId,
-                        publishedAt: keep.publishedAt,
-                        author: keep.author,
-                        authorAvatar: keep.authorAvatar,
-                    } as MixMaterial
-                    : picked,
-            });
-            setEditorSeq((n) => n + 1);
-            showToast(`表单已换成「${picked.name}」的内容，还没保存。`);
+            const apply = () => {
+                setEditor({
+                    kind: editor.kind,
+                    initial: keep
+                        ? {
+                            ...picked,
+                            id: keep.id,
+                            createdAt: keep.createdAt,
+                            publishedId: keep.publishedId,
+                            publishedAt: keep.publishedAt,
+                            author: keep.author,
+                            authorAvatar: keep.authorAvatar,
+                        } as MixMaterial
+                        : picked,
+                });
+                setEditorSeq((n) => n + 1);
+                showToast(`表单已换成「${picked.name}」的内容，还没保存。`);
+            };
+            // 编辑器里上传的文件带信任模式：和酒柜导入同一道明示，别让这条路绕过去
+            if (picked.kind === "mechanism" && picked.trusted === true) {
+                setConfirm({
+                    title: "这个文件是信任模式的机括",
+                    body: <>「{picked.name}」的代码<b>会直接在对局页面里运行，不进沙盒</b>：能画进正文、能联网，也能读写这台小手机上的数据。<br />只在你信任来源时载入。</>,
+                    confirmText: "我知道，载入",
+                    run: apply,
+                });
+                return;
+            }
+            apply();
         } catch (error) {
             showToast(error instanceof Error ? error.message : "读取失败");
         }
@@ -872,7 +885,7 @@ export function MixologyApp({ onClose }: { onClose: () => void }) {
                                         )}
                                         <div className="mix-session-info">
                                             <div className="mix-session-name">{session.charName} · {session.recipe.name}</div>
-                                            <div className="mix-session-sub">{session.turns.length} 条 · {formatMixTime(session.updatedAt)}</div>
+                                            <div className="mix-session-sub">{mixRoundCount(session.turns)} 轮 · {formatMixTime(session.updatedAt)}</div>
                                         </div>
                                         <button
                                             type="button"
@@ -881,7 +894,7 @@ export function MixologyApp({ onClose }: { onClose: () => void }) {
                                                 e.stopPropagation();
                                                 setConfirm({
                                                     title: "删除这场酒局？",
-                                                    body: <>「{session.charName} · {session.recipe.name}」的 {session.turns.length} 条对话会一起消失，无法找回。</>,
+                                                    body: <>「{session.charName} · {session.recipe.name}」的 {mixRoundCount(session.turns)} 轮对话会一起消失，无法找回。</>,
                                                     confirmText: "删除",
                                                     tone: "danger",
                                                     run: () => { deleteMixSession(session.id); refresh(); },
