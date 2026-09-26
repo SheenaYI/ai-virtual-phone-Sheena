@@ -4660,7 +4660,10 @@ html,body{margin:0;padding:0;width:100%;height:100%;background:#121110;color:rgb
                                         }
                                       />
                                     ) : customIconUrl ? null : (
-                                      <CustomAppGlyph seed={customApp?.name || icon.label} className="icon-glyph" />
+                                      <CustomAppGlyph
+                                        seed={customApp?.name || icon.label}
+                                        className={iconSkinUrl ? "icon-glyph icon-glyph-hidden" : "icon-glyph"}
+                                      />
                                     )}
                                     {badgeCount > 0 ? (
                                       <span className="desktop-icon-badge" aria-label={`${badgeCount} 条未读`}>
@@ -4800,7 +4803,10 @@ html,body{margin:0;padding:0;width:100%;height:100%;background:#121110;color:rgb
                               }
                             />
                           ) : customIconUrl ? null : (
-                            <CustomAppGlyph seed={customApp?.name || icon.label} className="icon-glyph" />
+                            <CustomAppGlyph
+                              seed={customApp?.name || icon.label}
+                              className={iconSkinUrl ? "icon-glyph icon-glyph-hidden" : "icon-glyph"}
+                            />
                           )}
                         </span>
                         <span className="icon-label">{icon.label}</span>
@@ -4997,7 +5003,10 @@ html,body{margin:0;padding:0;width:100%;height:100%;background:#121110;color:rgb
                                         className={memberSkinUrl ? "icon-glyph icon-glyph-hidden" : "icon-glyph"}
                                       />
                                     ) : memberCustomUrl ? null : (
-                                      <CustomAppGlyph seed={memberCustomApp?.name || ""} className="icon-glyph" />
+                                      <CustomAppGlyph
+                                        seed={memberCustomApp?.name || ""}
+                                        className={memberSkinUrl ? "icon-glyph icon-glyph-hidden" : "icon-glyph"}
+                                      />
                                     )}
                                     {memberBadge > 0 ? (
                                       <span className="desktop-icon-badge" aria-label={`${memberBadge} 条未读`}>
