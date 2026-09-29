@@ -11,6 +11,7 @@ import {
 } from "./memory-storage";
 import { resolveAuxiliaryApiConfig } from "./settings-storage";
 import { simpleLLMCall } from "./api-helpers";
+import { buildCoreRoomScopeText, resolveCoreMemoryRooms } from "./memory-room";
 
 const coreBuildingSet = new Set<string>();
 
@@ -52,8 +53,12 @@ export async function runCoreMemoryPipeline(
     }
 
     const afterTimestamp = options?.force ? undefined : (getLastCoreSummarizedTimestamp(characterId) ?? undefined);
+    // 记忆宫殿：按勾选房间过滤喂料（未启用过滤时＝全部，保持旧行为）。
+    // 未归档条目始终参与，避免老数据在开启过滤后被静默排除。
+    const roomFilter = config.coreMemoryRoomFilterEnabled ? new Set(resolveCoreMemoryRooms(config)) : null;
     const entries = allLongTermEntries
         .filter(entry => !afterTimestamp || entry.createdAt > afterTimestamp)
+        .filter(entry => !roomFilter || !entry.room || roomFilter.has(entry.room))
         .map(entry => ({
             id: entry.id,
             timestamp: entry.createdAt,
@@ -75,12 +80,20 @@ export async function runCoreMemoryPipeline(
 
     const { eventsText, earliest, latest } = formatted;
     const promptTemplate = config.coreMemoryPrompt?.trim() || DEFAULT_CORE_MEMORY_PROMPT;
-    const prompt = promptTemplate
+    const roomScope = buildCoreRoomScopeText(config);
+    let prompt = promptTemplate
         .replace(/\{\{char\}\}/gi, characterName)
         .replace(/\{\{earliest\}\}/gi, earliest)
         .replace(/\{\{latest\}\}/gi, latest)
+        .replace(/\{\{rooms\}\}/gi, roomScope)
         .replace(/\{\{events\}\}/gi, eventsText)
         .replace(/\{\{longTermMemories\}\}/gi, eventsText);
+    // 用户模板没有 {{rooms}} 时，把来源限定附在末尾
+    if (roomScope && !/\{\{\s*rooms\s*\}\}/i.test(promptTemplate)) {
+        prompt = `${prompt.trim()}\n\n${roomScope}`;
+    }
+    // 占位符解析成空串会留下多余空行
+    prompt = prompt.replace(/\n{3,}/g, "\n\n").trim();
 
     const result = await simpleLLMCall(
         apiConfig,

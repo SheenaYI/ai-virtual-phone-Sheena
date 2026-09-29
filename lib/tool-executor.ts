@@ -27,7 +27,8 @@ import { AGENT_COMPUTER_CAPABILITY_ID, CALENDAR_MANAGEMENT_CAPABILITY_ID, LOCAL_
 import { bridgeConnection, loadBridgeDataItems, loadBridgeShortcutActions, readAllBridgeStateSnapshots, readBridgeStateSnapshot } from "./reality-bridge/storage";
 import { createShortcutCommand, deliverShortcutCommand, waitForShortcutCommand } from "./shortcut-command-client";
 import { loadMemoryEntriesByType, saveMemoryEntry } from "./memory-storage";
-import type { MemoryEntry } from "./memory-types";
+import type { MemoryEntry, MemoryRoom } from "./memory-types";
+import { normalizeMemoryRoom } from "./memory-room";
 import { loadCharacters } from "./character-storage";
 import {
     deleteCalendarScheduleItem,
@@ -88,6 +89,8 @@ export type MemoryWriteRequest = {
     content: string;
     importance: number;
     reason?: string;
+    /** 记忆宫殿房间；不填 = 未归档 */
+    room?: MemoryRoom;
 };
 
 export type ToolExecutionContext = {
@@ -2926,6 +2929,8 @@ async function executeMemoryWriteTool(
 
     const importance = clampImportance(args.importance);
     const reason = String(args.reason ?? "").trim() || undefined;
+    // 记忆宫殿：角色可自行指定房间；无法识别则留空（未归档）
+    const room = normalizeMemoryRoom(args.room ?? args.roomId ?? args.room_id);
 
     const duplicate = await isDuplicateLongTermMemory(context.characterId, content);
     if (duplicate) {
@@ -2946,6 +2951,8 @@ async function executeMemoryWriteTool(
         content,
         importance,
         ...(reason ? { reason } : {}),
+        // 必须一起进 pendingRequest：否则 confirm 模式下用户点确认后房间会丢
+        ...(room ? { room } : {}),
     };
 
     if (capability.mode === "confirm") {
@@ -3071,6 +3078,7 @@ async function persistMemoryWriteRequest(
         importance: request.importance,
         createdAt: now,
         updatedAt: now,
+        ...(request.room ? { room: request.room } : {}),
         metadata: {
             origin: "ai_tool",
             sessionId: request.sessionId,

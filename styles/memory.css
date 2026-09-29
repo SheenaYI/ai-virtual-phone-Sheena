@@ -1,0 +1,193 @@
+/* 记忆宫殿（房间）相关样式
+ * 复用现有卡片/菜单基础类，这里只补房间分组、房间 chip、菜单房间选择、置顶徽标等增量样式。
+ */
+
+/* ── 房间筛选 chip 行 ── */
+.mem-room-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    padding: 2px 2px 6px;
+}
+
+.mem-room-chips .ui-chip {
+    height: 28px;
+    padding: 0 10px;
+    font-size: 12px;
+}
+
+.mem-room-chips .ui-chip.is-unfiled {
+    opacity: 0.85;
+}
+
+/* ── 房间分组 ── */
+.mem-room-group {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-top: 6px;
+}
+
+.mem-room-group-head {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 2px 4px;
+    color: var(--text-secondary, rgba(255, 255, 255, 0.6));
+}
+
+.mem-room-group-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    opacity: 0.75;
+}
+
+.mem-room-group-name {
+    font-size: 13px;
+    font-weight: 600;
+    letter-spacing: 0.5px;
+    color: var(--text-primary, #fff);
+}
+
+.mem-room-group-stat {
+    margin-left: auto;
+    font-size: 11px;
+    opacity: 0.7;
+    white-space: nowrap;
+}
+
+.mem-room-group-add {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 24px;
+    height: 24px;
+    border: none;
+    border-radius: 50%;
+    background: transparent;
+    color: var(--text-secondary, rgba(255, 255, 255, 0.6));
+    cursor: pointer;
+}
+
+.mem-room-group-add:active {
+    opacity: 0.6;
+}
+
+.mem-room-group-warn {
+    margin: 0 4px;
+    font-size: 11px;
+    line-height: 1.6;
+    color: var(--color-warning, #e0a75e);
+    opacity: 0.9;
+}
+
+/* ── 置顶 ── */
+.memory-report-card.is-pinned {
+    box-shadow: inset 0 0 0 1px var(--color-accent, rgba(255, 255, 255, 0.18));
+}
+
+.mem-pin-badge {
+    display: inline-flex;
+    align-items: center;
+    margin-right: 4px;
+    opacity: 0.75;
+}
+
+/* ── 条目菜单里的房间选择 ── */
+.mem-entry-menu-title {
+    padding: 6px 12px 2px;
+    font-size: 11px;
+    opacity: 0.6;
+}
+
+.mem-entry-menu-rooms {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    max-width: 210px;
+    padding: 2px 12px 6px;
+}
+
+.mem-entry-menu-room {
+    padding: 3px 8px;
+    border: 1px solid rgba(255, 255, 255, 0.14);
+    border-radius: 999px;
+    background: transparent;
+    color: inherit;
+    font-size: 11px;
+    line-height: 1.5;
+    cursor: pointer;
+}
+
+.mem-entry-menu-room.is-active {
+    border-color: var(--color-accent, rgba(255, 255, 255, 0.5));
+    background: rgba(255, 255, 255, 0.08);
+}
+
+/* ── 编辑弹窗里的房间选择 ── */
+.mem-edit-rooms {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin-top: 10px;
+}
+
+.mem-edit-rooms-title {
+    margin: 0;
+    font-size: 12px;
+    opacity: 0.7;
+}
+
+.mem-edit-rooms-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+}
+
+.mem-edit-rooms-chips .ui-chip {
+    height: 28px;
+    padding: 0 10px;
+    font-size: 12px;
+}
+
+/* ── 房间归档标准弹窗 ── */
+.mem-room-prompt-tabs {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    padding: 10px 8px 6px;
+}
+
+.mem-room-prompt-tab {
+    padding: 4px 10px;
+    border: 1px solid rgba(255, 255, 255, 0.14);
+    border-radius: 999px;
+    background: transparent;
+    color: inherit;
+    font-size: 12px;
+    cursor: pointer;
+}
+
+.mem-room-prompt-tab.is-active {
+    border-color: var(--color-accent, rgba(255, 255, 255, 0.5));
+    background: rgba(255, 255, 255, 0.08);
+    font-weight: 600;
+}
+
+/* ── 提示词缺失占位符提示 ── */
+.mem-prompt-hint {
+    margin: 0;
+    padding: 8px 10px;
+    border-radius: 8px;
+    background: rgba(224, 167, 94, 0.12);
+    font-size: 12px;
+    line-height: 1.6;
+    opacity: 0.9;
+}
+
+/* ── 房间预算组的常驻行（缩进，视觉上从属上面的房间滑块）── */
+.mem-room-resident-row {
+    padding-left: 26px;
+    opacity: 0.9;
+}

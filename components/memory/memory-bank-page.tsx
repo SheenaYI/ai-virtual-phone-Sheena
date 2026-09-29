@@ -1,14 +1,19 @@
 "use client";
 
 import { Component, useState, useEffect, useCallback, type CSSProperties, type ReactNode } from "react";
-import { Trash2, Zap, Clock, Users, Archive, AlertCircle, Search, Brain, FileText, MoreHorizontal, Plus, Edit3, X, Check, ChevronRight, Filter, type LucideIcon } from "lucide-react";
+import { Trash2, Zap, Clock, Users, Archive, AlertCircle, Search, Brain, FileText, MoreHorizontal, Plus, Edit3, X, Check, ChevronRight, Filter, Home, Pin, Wand2, FolderOpen, type LucideIcon } from "lucide-react";
 import { ConfirmDialog } from "@/components/ui/modal";
 import { MemoryTimeline } from "./memory-timeline";
 import { Toggle } from "@/components/ui/form";
 import { loadCharacters } from "@/lib/character-storage";
 import type { Character } from "@/lib/character-types";
-import type { MemoryEntry, MemoryConfig } from "@/lib/memory-types";
-import { DEFAULT_CORE_MEMORY_PROMPT, DEFAULT_SUMMARIZATION_PROMPT } from "@/lib/memory-types";
+import type { MemoryEntry, MemoryConfig, MemoryRoom } from "@/lib/memory-types";
+import {
+    DEFAULT_CORE_MEMORY_PROMPT,
+    DEFAULT_SUMMARIZATION_PROMPT,
+    MEMORY_CORE_PROMPT_PLACEHOLDERS,
+    MEMORY_LONG_TERM_PROMPT_PLACEHOLDERS,
+} from "@/lib/memory-types";
 import {
     loadMemoryConfig,
     saveMemoryConfig,
@@ -20,7 +25,20 @@ import {
     getMemoryCountByType,
     getLastSummarizedTimestamp,
     getLastCoreSummarizedTimestamp,
+    patchMemoryEntry,
+    applyRoomPromptTemplate,
+    hasRoomSpecPlaceholder,
 } from "@/lib/memory-storage";
+import {
+    MEMORY_ROOMS,
+    MEMORY_ROOM_META,
+    UNFILED_ROOM_LABEL,
+    ROOM_BUDGET_MAX,
+    ROOM_BUDGET_MIN,
+    ROOM_BUDGET_STEP,
+} from "@/lib/memory-room";
+import { reclassifyMemoryRooms } from "@/lib/memory-room-reclassify";
+import { estimateTokens } from "@/lib/token-counter";
 import { hydrateChatStorage } from "@/lib/chat-storage";
 import { loadNativeTimeline, type NativeTimelineEntry } from "@/lib/short-term-assembler";
 import { runSummarizationPipeline } from "@/lib/memory-summarizer";
@@ -96,7 +114,12 @@ type MemoryEditorState = {
     type: MemoryEntry["type"];
     entry?: MemoryEntry;
     content: string;
+    /** 记忆宫殿房间（可选）；新增时可由所在房间卡片预选 */
+    room?: MemoryRoom;
 };
+
+/** 房间 chip 的筛选值：all = 全部，none = 未归档 */
+type RoomFilter = "all" | "none" | MemoryRoom;
 
 const memorySettingsIconStyle = (color: string): CSSProperties => ({
     "--icon-color": color,
@@ -205,6 +228,14 @@ export function MemoryBankPage({ view, selectedCharId, onSelectChar, onNotice }:
     const [savingMemory, setSavingMemory] = useState(false);
     const [summarizeRangeOpen, setSummarizeRangeOpen] = useState(false);
     const [sourcePickerOpen, setSourcePickerOpen] = useState(false);
+    // ── 记忆宫殿 ──
+    const [roomFilter, setRoomFilter] = useState<RoomFilter>("all");
+    const [reclassifying, setReclassifying] = useState(false);
+    const [reclassifyProgress, setReclassifyProgress] = useState<string | null>(null);
+    const [roomPromptEditing, setRoomPromptEditing] = useState<Partial<Record<MemoryRoom, string>>>({});
+    const [reclassifyScopeOpen, setReclassifyScopeOpen] = useState(false);
+    const [roomPromptPickerOpen, setRoomPromptPickerOpen] = useState(false);
+    const [activeRoomPrompt, setActiveRoomPrompt] = useState<MemoryRoom>("living");
 
     const disabledSourceCount = MEMORY_SOURCE_OPTIONS
         .filter(source => (config.shortTermAllowedSources ?? {})[source.key] === false).length;
@@ -326,16 +357,130 @@ export function MemoryBankPage({ view, selectedCharId, onSelectChar, onNotice }:
         loadCharacterList();
     };
 
+    const showNotice = (msg: string) => {
+        onNotice?.(msg);
+    };
+
+    // ── 记忆宫殿：房间 / 置顶 ──
+    const handleSetRoom = async (id: string, room: MemoryRoom | null) => {
+        const updated = await patchMemoryEntry(id, { room });
+        if (updated) {
+            setLongTermEntries(prev => prev.map(entry => entry.id === id ? updated : entry));
+            showNotice(room ? `已移入「${MEMORY_ROOM_META[room].label}」` : "已移出房间（未归档）");
+        }
+        setEntryMenuId(null);
+    };
+
+    const handleTogglePin = async (entry: MemoryEntry) => {
+        const updated = await patchMemoryEntry(entry.id, { pinned: !entry.pinned });
+        if (updated) {
+            setLongTermEntries(prev => prev.map(item => item.id === entry.id ? updated : item));
+            showNotice(updated.pinned ? "已置顶，不参与截断与淘汰" : "已取消置顶");
+        }
+        setEntryMenuId(null);
+    };
+
+    const handleReclassify = async (scope: "unassigned" | "all") => {
+        if (!selectedCharId || reclassifying) return;
+        setReclassifying(true);
+        setReclassifyProgress("准备中...");
+        try {
+            const result = await reclassifyMemoryRooms(
+                selectedCharId,
+                selectedChar?.name ?? "",
+                config,
+                {
+                    scope,
+                    includeManual: !config.reclassifySkipManual,
+                    onProgress: progress => setReclassifyProgress(
+                        `已处理 ${progress.processed}/${progress.total}（归档 ${progress.updated}）`,
+                    ),
+                },
+            );
+            if (!result.success) {
+                showNotice(result.error || "重新归档失败");
+            } else {
+                showNotice(`重新归档完成：归档 ${result.updated} 条，跳过 ${result.skipped} 条`);
+                await loadDetailData(selectedCharId);
+                loadCharacterList();
+            }
+        } catch (err) {
+            console.error("[MemoryBank] Reclassify failed:", err);
+            showNotice("重新归档失败: " + String(err));
+        } finally {
+            setReclassifying(false);
+            setReclassifyProgress(null);
+        }
+    };
+
+    const saveRoomBudget = (room: MemoryRoom, value: number) => {
+        if (!Number.isFinite(value)) return;
+        const clamped = Math.min(ROOM_BUDGET_MAX, Math.max(ROOM_BUDGET_MIN, Math.round(value)));
+        const next = { ...config, roomBudgets: { ...config.roomBudgets, [room]: clamped } };
+        setConfig(next);
+        saveMemoryConfig(next);
+    };
+
+    const toggleRoomEnabledForPrompt = (room: MemoryRoom) => {
+        const current = config.roomPromptRooms ?? [];
+        const has = current.includes(room);
+        const nextRooms = has ? current.filter(item => item !== room) : [...current, room];
+        // 至少保留一个房间，否则总结时没有任何房间可选
+        if (nextRooms.length === 0) {
+            showNotice("至少要保留一个房间");
+            return;
+        }
+        const next = { ...config, roomPromptRooms: nextRooms };
+        setConfig(next);
+        saveMemoryConfig(next);
+    };
+
+    const toggleCoreMemoryRoom = (room: MemoryRoom) => {
+        const current = config.coreMemoryRooms ?? [];
+        const has = current.includes(room);
+        const nextRooms = has ? current.filter(item => item !== room) : [...current, room];
+        if (nextRooms.length === 0) {
+            showNotice("至少要保留一个房间");
+            return;
+        }
+        const next = { ...config, coreMemoryRooms: nextRooms };
+        setConfig(next);
+        saveMemoryConfig(next);
+    };
+
+    const saveRoomPrompt = (room: MemoryRoom) => {
+        const text = roomPromptEditing[room];
+        if (text === undefined) return;
+        const next = { ...config, roomPrompts: { ...config.roomPrompts, [room]: text.trim() || MEMORY_ROOM_META[room].criteria } };
+        setConfig(next);
+        saveMemoryConfig(next);
+        setRoomPromptEditing(prev => {
+            const copy = { ...prev };
+            delete copy[room];
+            return copy;
+        });
+        showNotice(`「${MEMORY_ROOM_META[room].label}」的归档标准已保存`);
+    };
+
+    const handleApplyRoomTemplate = (force: boolean) => {
+        const result = applyRoomPromptTemplate(config, { force });
+        if (!result.replacedLongTerm && !result.replacedCore) {
+            showNotice("当前提示词不是出厂原文，已跳过；如需覆盖请再次确认强制套用");
+            return;
+        }
+        setConfig(result.config);
+        saveMemoryConfig(result.config);
+        setEditingPrompt(null);
+        setEditingCorePrompt(null);
+        showNotice(force ? "已套用房间版提示词模板" : "已套用房间版提示词模板（仅替换出厂原文）");
+    };
+
     const handleClearEntries = async (type: "core" | "long_term") => {
         if (!selectedCharId) return;
         await deleteCharacterMemoriesByType(selectedCharId, type);
         if (type === "core") setCoreEntries([]);
         else setLongTermEntries([]);
         loadCharacterList();
-    };
-
-    const showNotice = (msg: string) => {
-        onNotice?.(msg);
     };
 
     const handleManualSummarize = async (range: SummarizeRange = "auto") => {
@@ -486,14 +631,20 @@ export function MemoryBankPage({ view, selectedCharId, onSelectChar, onNotice }:
         }
     };
 
-    const openCreateMemoryEditor = (type: MemoryEntry["type"]) => {
+    const openCreateMemoryEditor = (type: MemoryEntry["type"], room?: MemoryRoom) => {
         setEntryMenuId(null);
-        setMemoryEditor({ type, content: "" });
+        // 在某个房间卡片下点「新增」时预选该房间
+        setMemoryEditor({ type, content: "", ...(room ? { room } : {}) });
     };
 
     const openEditMemoryEditor = (entry: MemoryEntry) => {
         setEntryMenuId(null);
-        setMemoryEditor({ type: entry.type, entry, content: entry.content });
+        setMemoryEditor({
+            type: entry.type,
+            entry,
+            content: entry.content,
+            ...(entry.room ? { room: entry.room } : {}),
+        });
     };
 
     const handleSaveManualMemory = async () => {
@@ -517,6 +668,8 @@ export function MemoryBankPage({ view, selectedCharId, onSelectChar, onNotice }:
             const embedding = type === "long_term"
                 ? (contentChanged ? await maybeBuildManualMemoryEmbedding(type, content) : source?.embedding)
                 : undefined;
+            // 房间只作用于长期记忆（核心记忆是提炼结果，不参与房间划分）
+            const editorRoom = type === "long_term" ? memoryEditor.room : undefined;
             const entry: MemoryEntry = source
                 ? {
                     ...source,
@@ -543,6 +696,9 @@ export function MemoryBankPage({ view, selectedCharId, onSelectChar, onNotice }:
                         origin: "user_manual",
                     },
                 };
+            // 显式写入/清除房间，避免旧房间在编辑后残留
+            if (editorRoom) entry.room = editorRoom;
+            else delete entry.room;
 
             await saveMemoryEntry(entry);
             if (type === "core") {
@@ -562,8 +718,160 @@ export function MemoryBankPage({ view, selectedCharId, onSelectChar, onNotice }:
         }
     };
 
+    const renderEntryCard = (entry: MemoryEntry) => (
+        <div
+            key={entry.id}
+            className={`g-card memory-report-card${entryMenuId === entry.id ? " is-menu-open" : ""}${entry.pinned ? " is-pinned" : ""}`}
+            onClick={() => {
+                if (entryMenuId) {
+                    setEntryMenuId(null);
+                    return;
+                }
+                setExpandedId(expandedId === entry.id ? null : entry.id);
+            }}
+        >
+            <div className="mem-report-head">
+                <span className="ts-11 text-secondary" style={{ letterSpacing: "1px" }}>[ DATE: {relativeTime(entry.createdAt)} ]</span>
+                <div className="mem-report-actions">
+                    {entry.pinned ? (
+                        <span className="mem-pin-badge" title="置顶：不参与截断与淘汰">
+                            <Pin size={11} strokeWidth={2} />
+                        </span>
+                    ) : null}
+                    <span className={`mem-origin-badge ${isManualMemoryEntry(entry) ? "is-manual" : ""}`}>
+                        {isManualMemoryEntry(entry) ? "MANUAL" : "AUTO"}
+                    </span>
+                    <div className="mem-entry-menu-wrap">
+                        <button
+                            className="mem-entry-menu-btn"
+                            onClick={(event) => {
+                                event.stopPropagation();
+                                setEntryMenuId(prev => prev === entry.id ? null : entry.id);
+                            }}
+                            title="更多"
+                        >
+                            <MoreHorizontal size={18} />
+                        </button>
+                        {entryMenuId === entry.id && (
+                            <div className="mem-entry-menu" onClick={event => event.stopPropagation()}>
+                                <button onClick={() => openEditMemoryEditor(entry)}>
+                                    <Edit3 size={13} />
+                                    <span>编辑</span>
+                                </button>
+                                <button onClick={() => handleTogglePin(entry)}>
+                                    <Pin size={13} />
+                                    <span>{entry.pinned ? "取消置顶" : "置顶"}</span>
+                                </button>
+                                {entry.type === "long_term" ? (
+                                    <>
+                                        <div className="mem-entry-menu-title">移入房间</div>
+                                        <div className="mem-entry-menu-rooms">
+                                            {MEMORY_ROOMS.map(room => (
+                                                <button
+                                                    key={room}
+                                                    className={`mem-entry-menu-room${entry.room === room ? " is-active" : ""}`}
+                                                    onClick={() => handleSetRoom(entry.id, room)}
+                                                >
+                                                    {MEMORY_ROOM_META[room].label}
+                                                </button>
+                                            ))}
+                                            <button
+                                                className={`mem-entry-menu-room${!entry.room ? " is-active" : ""}`}
+                                                onClick={() => handleSetRoom(entry.id, null)}
+                                            >
+                                                {UNFILED_ROOM_LABEL}
+                                            </button>
+                                        </div>
+                                    </>
+                                ) : null}
+                                <button
+                                    className="is-danger"
+                                    onClick={() => {
+                                        setEntryMenuId(null);
+                                        setConfirmDeleteEntryId(entry.id);
+                                    }}
+                                >
+                                    <Trash2 size={13} />
+                                    <span>删除</span>
+                                </button>
+                            </div>
+                        )}
+                    </div>
+                </div>
+            </div>
+            <div className="ts-12 leading-[1.7]">
+                {expandedId === entry.id
+                    ? entry.content
+                    : entry.content.length > 100
+                        ? entry.content.slice(0, 100) + "..."
+                        : entry.content
+                }
+            </div>
+        </div>
+    );
+
+    /** 记忆宫殿：长期记忆按房间分区展示（含未归档） */
+    const renderRoomsGroupedEntries = (entries: MemoryEntry[]) => {
+        const filtered = entries.filter(entry => {
+            if (roomFilter === "all") return true;
+            if (roomFilter === "none") return !entry.room;
+            return entry.room === roomFilter;
+        });
+        if (filtered.length === 0) {
+            return (
+                <div className="mem-empty-card">
+                    <p>这个分组下还没有记忆。</p>
+                    <button
+                        className="mem-empty-add-btn"
+                        onClick={() => openCreateMemoryEditor("long_term", roomFilter === "none" || roomFilter === "all" ? undefined : roomFilter)}
+                    >
+                        <Plus size={14} />
+                        <span>新增长期记忆</span>
+                    </button>
+                </div>
+            );
+        }
+        const groups: Array<{ room?: MemoryRoom; label: string }> = [
+            ...MEMORY_ROOMS.map(room => ({ room: room as MemoryRoom, label: MEMORY_ROOM_META[room].label })),
+            { room: undefined, label: UNFILED_ROOM_LABEL },
+        ];
+        return (
+            <>
+                {groups.map(group => {
+                    const items = filtered.filter(entry => (group.room ? entry.room === group.room : !entry.room));
+                    if (items.length === 0) return null;
+                    const used = items.reduce((sum, entry) => sum + estimateTokens(entry.content) + 4, 0);
+                    const budget = group.room ? (config.roomBudgets?.[group.room] ?? 0) : 0;
+                    const over = group.room ? used > budget : false;
+                    return (
+                        <div key={group.room ?? "unfiled"} className="mem-room-group">
+                            <div className="mem-room-group-head">
+                                <span className="mem-room-group-icon"><Home size={13} strokeWidth={1.8} /></span>
+                                <span className="mem-room-group-name">{group.label}</span>
+                                <span className="mem-room-group-stat">
+                                    {items.length} 条 · ~{used} tk
+                                    {group.room ? ` / 预算 ${budget}` : ""}
+                                </span>
+                                <button
+                                    className="mem-room-group-add"
+                                    onClick={() => openCreateMemoryEditor("long_term", group.room)}
+                                    title="在此房间新增记忆"
+                                >
+                                    <Plus size={14} />
+                                </button>
+                            </div>
+                            {over ? <p className="mem-room-group-warn">已超出该房间预算，注入时会被截断。</p> : null}
+                            {items.map(entry => renderEntryCard(entry))}
+                        </div>
+                    );
+                })}
+            </>
+        );
+    };
+
     const renderMemoryEntries = (type: MemoryEntry["type"], entries: MemoryEntry[], emptyText: string) => {
         const label = type === "core" ? "核心记忆" : "长期记忆";
+        const roomMode = type === "long_term" && config.roomEnabled;
         return (
             <>
                 {entries.length > 0 && (
@@ -584,6 +892,44 @@ export function MemoryBankPage({ view, selectedCharId, onSelectChar, onNotice }:
                         </button>
                     </div>
                 )}
+                {roomMode ? (
+                    <div className="mem-room-chips">
+                        <button
+                            className="ui-chip"
+                            {...(roomFilter === "all" ? { "data-selected": "" } : {})}
+                            onClick={() => setRoomFilter("all")}
+                        >
+                            全部
+                        </button>
+                        {MEMORY_ROOMS.map(room => {
+                            const count = entries.filter(entry => entry.room === room).length;
+                            if (count === 0 && roomFilter !== room) return null;
+                            return (
+                                <button
+                                    key={room}
+                                    className="ui-chip"
+                                    {...(roomFilter === room ? { "data-selected": "" } : {})}
+                                    onClick={() => setRoomFilter(room)}
+                                >
+                                    {MEMORY_ROOM_META[room].label} {count}
+                                </button>
+                            );
+                        })}
+                        {(() => {
+                            const unfiledCount = entries.filter(entry => !entry.room).length;
+                            if (unfiledCount === 0) return null;
+                            return (
+                                <button
+                                    className="ui-chip is-unfiled"
+                                    {...(roomFilter === "none" ? { "data-selected": "" } : {})}
+                                    onClick={() => setRoomFilter("none")}
+                                >
+                                    {UNFILED_ROOM_LABEL} {unfiledCount}
+                                </button>
+                            );
+                        })()}
+                    </div>
+                ) : null}
                 {entryMenuId && (
                     <button
                         className="mem-entry-menu-backdrop"
@@ -599,67 +945,10 @@ export function MemoryBankPage({ view, selectedCharId, onSelectChar, onNotice }:
                             <span>新增{label}</span>
                         </button>
                     </div>
+                ) : roomMode ? (
+                    renderRoomsGroupedEntries(entries)
                 ) : (
-                    entries.map(entry => (
-                        <div
-                            key={entry.id}
-                            className={`g-card memory-report-card${entryMenuId === entry.id ? " is-menu-open" : ""}`}
-                            onClick={() => {
-                                if (entryMenuId) {
-                                    setEntryMenuId(null);
-                                    return;
-                                }
-                                setExpandedId(expandedId === entry.id ? null : entry.id);
-                            }}
-                        >
-                            <div className="mem-report-head">
-                                <span className="ts-11 text-secondary" style={{ letterSpacing: "1px" }}>[ DATE: {relativeTime(entry.createdAt)} ]</span>
-                                <div className="mem-report-actions">
-                                    <span className={`mem-origin-badge ${isManualMemoryEntry(entry) ? "is-manual" : ""}`}>
-                                        {isManualMemoryEntry(entry) ? "MANUAL" : "AUTO"}
-                                    </span>
-                                    <div className="mem-entry-menu-wrap">
-                                        <button
-                                            className="mem-entry-menu-btn"
-                                            onClick={(event) => {
-                                                event.stopPropagation();
-                                                setEntryMenuId(prev => prev === entry.id ? null : entry.id);
-                                            }}
-                                            title="更多"
-                                        >
-                                            <MoreHorizontal size={18} />
-                                        </button>
-                                        {entryMenuId === entry.id && (
-                                            <div className="mem-entry-menu" onClick={event => event.stopPropagation()}>
-                                                <button onClick={() => openEditMemoryEditor(entry)}>
-                                                    <Edit3 size={13} />
-                                                    <span>编辑</span>
-                                                </button>
-                                                <button
-                                                    className="is-danger"
-                                                    onClick={() => {
-                                                        setEntryMenuId(null);
-                                                        setConfirmDeleteEntryId(entry.id);
-                                                    }}
-                                                >
-                                                    <Trash2 size={13} />
-                                                    <span>删除</span>
-                                                </button>
-                                            </div>
-                                        )}
-                                    </div>
-                                </div>
-                            </div>
-                            <div className="ts-12 leading-[1.7]">
-                                {expandedId === entry.id
-                                    ? entry.content
-                                    : entry.content.length > 100
-                                        ? entry.content.slice(0, 100) + "..."
-                                        : entry.content
-                                }
-                            </div>
-                        </div>
-                    ))
+                    entries.map(entry => renderEntryCard(entry))
                 )}
             </>
         );
@@ -720,6 +1009,7 @@ export function MemoryBankPage({ view, selectedCharId, onSelectChar, onNotice }:
                             onClick={() => {
                                 setActiveTab(tab.key);
                                 setEntryMenuId(null);
+                                setRoomFilter("all");
                             }}
                         >
                             <tab.icon size={18} />
@@ -766,6 +1056,37 @@ export function MemoryBankPage({ view, selectedCharId, onSelectChar, onNotice }:
                                         disabled={savingMemory}
                                         onChange={event => setMemoryEditor(prev => prev ? { ...prev, content: event.target.value } : prev)}
                                     />
+                                    {!isCore && config.roomEnabled ? (
+                                        <div className="mem-edit-rooms">
+                                            <p className="mem-edit-rooms-title">存放房间</p>
+                                            <div className="mem-edit-rooms-chips">
+                                                {MEMORY_ROOMS.map(room => (
+                                                    <button
+                                                        key={room}
+                                                        type="button"
+                                                        className="ui-chip"
+                                                        {...(memoryEditor.room === room ? { "data-selected": "" } : {})}
+                                                        onClick={() => setMemoryEditor(prev => prev ? { ...prev, room } : prev)}
+                                                    >
+                                                        {MEMORY_ROOM_META[room].label}
+                                                    </button>
+                                                ))}
+                                                <button
+                                                    type="button"
+                                                    className="ui-chip is-unfiled"
+                                                    {...(memoryEditor.room ? {} : { "data-selected": "" })}
+                                                    onClick={() => setMemoryEditor(prev => {
+                                                        if (!prev) return prev;
+                                                        const copy = { ...prev };
+                                                        delete copy.room;
+                                                        return copy;
+                                                    })}
+                                                >
+                                                    {UNFILED_ROOM_LABEL}
+                                                </button>
+                                            </div>
+                                        </div>
+                                    ) : null}
                                     <div className={`mem-edit-footer ${overLimit ? "is-over-limit" : ""}`}>
                                         <span>{isCore ? "CORE" : "LONG TERM"}</span>
                                         <span>{contentLength}/{MANUAL_MEMORY_CONTENT_LIMIT}</span>
@@ -956,6 +1277,199 @@ export function MemoryBankPage({ view, selectedCharId, onSelectChar, onNotice }:
                     </div>
                 ) : null}
 
+                {/* 记忆宫殿：重新归档房间 */}
+                {reclassifyScopeOpen ? (
+                    <div className="modal-overlay modal-overlay-bottom" data-ui="modal" onClick={() => reclassifying ? undefined : setReclassifyScopeOpen(false)}>
+                        <div className="modal-sheet" data-ui="modal-sheet" onClick={event => event.stopPropagation()}>
+                            <div className="modal-header" data-ui="modal-header">
+                                <button className="modal-header-btn modal-header-btn-muted" onClick={() => setReclassifyScopeOpen(false)} disabled={reclassifying}><X size={18} /></button>
+                                <h3 className="modal-title">重新归档房间</h3>
+                                <span style={{ width: 44 }} />
+                            </div>
+                            <div className="modal-body modal-body-tight" data-ui="modal-body">
+                                <p className="menu-group-desc mx-2">
+                                    只修改记忆的房间归属，不会重写记忆正文，可以随时重跑。
+                                    {config.reclassifySkipManual ? "已开启保护：手动新增/编辑过的条目会被跳过。" : "当前会覆盖手动编辑过的条目。"}
+                                </p>
+                                <div className="menu-group">
+                                    <button
+                                        type="button"
+                                        className="menu-item w-full text-left"
+                                        disabled={reclassifying}
+                                        onClick={() => { setReclassifyScopeOpen(false); void handleReclassify("unassigned"); }}
+                                    >
+                                        <div className="menu-label-group">
+                                            <span className="menu-label">只归档未归档的</span>
+                                            <span className="menu-desc">默认方式，只处理还没有房间的条目</span>
+                                        </div>
+                                    </button>
+                                    <button
+                                        type="button"
+                                        className="menu-item w-full text-left"
+                                        disabled={reclassifying}
+                                        onClick={() => { setReclassifyScopeOpen(false); void handleReclassify("all"); }}
+                                    >
+                                        <div className="menu-label-group">
+                                            <span className="menu-label">重新判定全部</span>
+                                            <span className="menu-desc">所有长期记忆重新分房间（更慢，覆盖已有房间）</span>
+                                        </div>
+                                    </button>
+                                </div>
+                                <div className="menu-group">
+                                    <div className="menu-item">
+                                        <MemorySettingsIcon icon={AlertCircle} color={BINDING_ACCENTS.memory} />
+                                        <div className="menu-label-group">
+                                            <span className="menu-label">保护手动修改</span>
+                                            <span className="menu-desc">跳过用户手动新增/编辑过的记忆</span>
+                                        </div>
+                                        <div className="menu-right">
+                                            <Toggle checked={config.reclassifySkipManual !== false} onChange={(v) => {
+                                                const next = { ...config, reclassifySkipManual: v };
+                                                setConfig(next);
+                                                saveMemoryConfig(next);
+                                            }} />
+                                        </div>
+                                    </div>
+                                </div>
+                                {reclassifyProgress ? (
+                                    <p className="menu-group-desc mx-2">{reclassifyProgress}</p>
+                                ) : null}
+                            </div>
+                        </div>
+                    </div>
+                ) : null}
+
+                {/* 记忆宫殿：房间归档标准 */}
+                {roomPromptPickerOpen ? (
+                    <div className="modal-overlay modal-overlay-bottom" data-ui="modal" onClick={() => setRoomPromptPickerOpen(false)}>
+                        <div className="modal-sheet memory-source-sheet" data-ui="modal-sheet" onClick={event => event.stopPropagation()}>
+                            <div className="modal-header" data-ui="modal-header">
+                                <span style={{ width: 28 }} />
+                                <h3 className="modal-title">房间归档标准</h3>
+                                <button className="modal-header-btn modal-header-btn-muted" onClick={() => setRoomPromptPickerOpen(false)}><X size={18} /></button>
+                            </div>
+                            <div className="modal-body modal-body-tight" data-ui="modal-body">
+                                <div className="memory-source-chips" style={{ "--chip-accent": BINDING_ACCENTS.memory } as CSSProperties}>
+                                    {MEMORY_ROOMS.map(room => {
+                                        const enabled = (config.roomPromptRooms ?? []).includes(room);
+                                        return (
+                                            <button
+                                                key={room}
+                                                type="button"
+                                                className="memory-source-chip"
+                                                data-off={enabled ? undefined : ""}
+                                                aria-pressed={enabled}
+                                                onClick={() => {
+                                                    toggleRoomEnabledForPrompt(room);
+                                                    setActiveRoomPrompt(room);
+                                                }}
+                                            >
+                                                {MEMORY_ROOM_META[room].label}
+                                            </button>
+                                        );
+                                    })}
+                                </div>
+                                <div className="mem-room-prompt-tabs">
+                                    {MEMORY_ROOMS.map(room => (
+                                        <button
+                                            key={room}
+                                            type="button"
+                                            className={`mem-room-prompt-tab${activeRoomPrompt === room ? " is-active" : ""}`}
+                                            onClick={() => setActiveRoomPrompt(room)}
+                                        >
+                                            {MEMORY_ROOM_META[room].label}
+                                        </button>
+                                    ))}
+                                </div>
+                                <textarea
+                                    className="ui-textarea w-full min-h-[120px] ts-13 leading-relaxed resize-y mx-2"
+                                    style={{ width: "calc(100% - 16px)" }}
+                                    value={roomPromptEditing[activeRoomPrompt] ?? config.roomPrompts?.[activeRoomPrompt] ?? MEMORY_ROOM_META[activeRoomPrompt].criteria}
+                                    placeholder={MEMORY_ROOM_META[activeRoomPrompt].criteria}
+                                    onChange={event => setRoomPromptEditing(prev => ({ ...prev, [activeRoomPrompt]: event.target.value }))}
+                                />
+                                <p className="menu-group-desc mx-2">
+                                    {MEMORY_ROOM_META[activeRoomPrompt].desc}。这段文字会在总结时作为该房间的收录标准送给模型。
+                                </p>
+                                <div className="px-4 pb-4">
+                                    <button
+                                        className="ui-btn ui-btn-primary p-2.5 w-full"
+                                        onClick={() => saveRoomPrompt(activeRoomPrompt)}
+                                        disabled={roomPromptEditing[activeRoomPrompt] === undefined}
+                                    >
+                                        <Check size={14} className="mr-1.5" /> 保存「{MEMORY_ROOM_META[activeRoomPrompt].label}」标准
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                ) : null}
+
+                {/* 记忆宫殿 */}
+                <p className="menu-group-desc mx-2">记忆宫殿</p>
+                <div className="menu-group">
+                    <div className="menu-item">
+                        <MemorySettingsIcon icon={Home} color={BINDING_ACCENTS.memory} />
+                        <div className="menu-label-group">
+                            <span className="menu-label">启用记忆宫殿</span>
+                            <span className="menu-desc">长期记忆按房间归类、注入时分板块；存量上限会自动放宽 3 倍（房间拆分会让条数变多）</span>
+                        </div>
+                        <div className="menu-right">
+                            <Toggle checked={config.roomEnabled === true} onChange={(v) => {
+                                let next = { ...config, roomEnabled: v };
+                                if (v) {
+                                    // 开启时自动补房间版模板（仅当提示词还是出厂原文，不覆盖手改内容）；
+                                    // 不打开分房间截断，注入形状优先保持不变。
+                                    next = applyRoomPromptTemplate(next, { force: false }).config;
+                                }
+                                setConfig(next);
+                                saveMemoryConfig(next);
+                            }} />
+                        </div>
+                    </div>
+                    {config.roomEnabled ? (
+                        <>
+                            <button type="button" className="menu-item" onClick={() => setRoomPromptPickerOpen(true)}>
+                                <MemorySettingsIcon icon={FolderOpen} color={BINDING_ACCENTS.preset} />
+                                <div className="menu-label-group">
+                                    <span className="menu-label">房间归档标准</span>
+                                    <span className="menu-desc">每个房间负责收录什么；不勾选的房间不参与总结</span>
+                                </div>
+                                <div className="menu-right">
+                                    <span className="menu-desc mr-1">{config.roomPromptRooms?.length ?? 0} 个房间</span>
+                                    <ChevronRight size={16} />
+                                </div>
+                            </button>
+                            <button type="button" className="menu-item" onClick={() => setReclassifyScopeOpen(true)} disabled={reclassifying}>
+                                <MemorySettingsIcon icon={Wand2} color={BINDING_ACCENTS.embedding} />
+                                <div className="menu-label-group">
+                                    <span className="menu-label">重新归档房间</span>
+                                    <span className="menu-desc">把已有长期记忆按内容重新分房间（只改房间，不动正文）</span>
+                                </div>
+                                <div className="menu-right">
+                                    <span className="menu-desc mr-1">{reclassifyProgress ?? (reclassifying ? "处理中..." : "未开始")}</span>
+                                    <ChevronRight size={16} />
+                                </div>
+                            </button>
+                            <div className="menu-item">
+                                <MemorySettingsIcon icon={Wand2} color={BINDING_ACCENTS.api} />
+                                <div className="menu-label-group">
+                                    <span className="menu-label">套用房间版提示词模板</span>
+                                    <span className="menu-desc">把手改过的总结提示词也替换成房间版（会覆盖）</span>
+                                </div>
+                                <div className="menu-right">
+                                    <button
+                                        className="ui-btn ui-btn-outline py-1 px-3 ts-12"
+                                        onClick={() => handleApplyRoomTemplate(true)}
+                                    >
+                                        套用
+                                    </button>
+                                </div>
+                            </div>
+                        </>
+                    ) : null}
+                </div>
+
                 {/* Feature toggles */}
                 <p className="menu-group-desc mx-2">自动化</p>
                 <div className="menu-group">
@@ -1006,6 +1520,25 @@ export function MemoryBankPage({ view, selectedCharId, onSelectChar, onNotice }:
                 {/* Token budget sliders */}
                 <p className="menu-group-desc mx-2">控制截断量</p>
                 <div className="menu-group">
+                    {config.roomEnabled ? (
+                        <div className="menu-item">
+                            <MemorySettingsIcon icon={Home} color={BINDING_ACCENTS.memory} />
+                            <div className="menu-label-group">
+                                <span className="menu-label">分房间截断</span>
+                                <span className="menu-desc">关闭时按「长期记忆」总预算整体截断（原行为）</span>
+                            </div>
+                            <div className="menu-right">
+                                <Toggle
+                                    checked={config.roomTruncationMode === "perRoom"}
+                                    onChange={(v) => {
+                                        const next = { ...config, roomTruncationMode: v ? "perRoom" as const : "global" as const };
+                                        setConfig(next);
+                                        saveMemoryConfig(next);
+                                    }}
+                                />
+                            </div>
+                        </div>
+                    ) : null}
                     <MemorySettingsSliderItem
                         icon={Users}
                         color={BINDING_ACCENTS.voice}
@@ -1040,6 +1573,88 @@ export function MemoryBankPage({ view, selectedCharId, onSelectChar, onNotice }:
                         onChange={value => saveBudget("coreMemoryTokenBudget", value)}
                     />
                 </div>
+
+                {/* 记忆宫殿：房间预算与常驻 */}
+                {config.roomEnabled && config.roomTruncationMode === "perRoom" ? (
+                    <>
+                        <p className="menu-group-desc mx-2">房间注入预算（每间单独控制）</p>
+                        <div className="menu-group">
+                            {MEMORY_ROOMS.map(room => (
+                                <div key={room}>
+                                    <MemorySettingsSliderItem
+                                        icon={Home}
+                                        color={BINDING_ACCENTS.memory}
+                                        label={MEMORY_ROOM_META[room].label}
+                                        desc={MEMORY_ROOM_META[room].desc}
+                                        value={config.roomBudgets?.[room] ?? MEMORY_ROOM_META[room].defaultBudget}
+                                        min={ROOM_BUDGET_MIN}
+                                        max={ROOM_BUDGET_MAX}
+                                        step={ROOM_BUDGET_STEP}
+                                        onChange={value => saveRoomBudget(room, value)}
+                                    />
+                                    <div className="menu-item mem-room-resident-row">
+                                        <div className="menu-label-group">
+                                            <span className="menu-label">常驻（不被挤掉）</span>
+                                            <span className="menu-desc">超预算时最后才被剔除</span>
+                                        </div>
+                                        <div className="menu-right">
+                                            <Toggle
+                                                checked={config.roomResident?.[room] === true}
+                                                onChange={(v) => {
+                                                    const next = { ...config, roomResident: { ...config.roomResident, [room]: v } };
+                                                    setConfig(next);
+                                                    saveMemoryConfig(next);
+                                                }}
+                                            />
+                                        </div>
+                                    </div>
+                                </div>
+                            ))}
+                        </div>
+                    </>
+                ) : null}
+
+                {/* 记忆宫殿：核心记忆来源房间 */}
+                {config.roomEnabled ? (
+                    <>
+                        <p className="menu-group-desc mx-2">核心记忆来源房间</p>
+                        <div className="menu-group">
+                            <div className="menu-item">
+                                <MemorySettingsIcon icon={Brain} color={BINDING_ACCENTS.embedding} />
+                                <div className="menu-label-group">
+                                    <span className="menu-label">按房间过滤</span>
+                                    <span className="menu-desc">只根据勾选的房间提炼核心记忆；关闭＝使用全部长期记忆</span>
+                                </div>
+                                <div className="menu-right">
+                                    <Toggle checked={config.coreMemoryRoomFilterEnabled === true} onChange={(v) => {
+                                        const next = { ...config, coreMemoryRoomFilterEnabled: v };
+                                        setConfig(next);
+                                        saveMemoryConfig(next);
+                                    }} />
+                                </div>
+                            </div>
+                            {config.coreMemoryRoomFilterEnabled ? (
+                                <div className="memory-source-chips mx-2" style={{ "--chip-accent": BINDING_ACCENTS.embedding } as CSSProperties}>
+                                    {MEMORY_ROOMS.map(room => {
+                                        const enabled = (config.coreMemoryRooms ?? []).includes(room);
+                                        return (
+                                            <button
+                                                key={room}
+                                                type="button"
+                                                className="memory-source-chip"
+                                                data-off={enabled ? undefined : ""}
+                                                aria-pressed={enabled}
+                                                onClick={() => toggleCoreMemoryRoom(room)}
+                                            >
+                                                {MEMORY_ROOM_META[room].label}
+                                            </button>
+                                        );
+                                    })}
+                                </div>
+                            ) : null}
+                        </div>
+                    </>
+                ) : null}
 
                 {/* Summarization interval */}
                 <p className="menu-group-desc mx-2">自动总结间隔</p>
@@ -1076,7 +1691,7 @@ export function MemoryBankPage({ view, selectedCharId, onSelectChar, onNotice }:
                         <div className="menu-label-group">
                             <span className="menu-label">长期记忆总结提示词</span>
                             <span className="menu-desc">
-                                变量：{"{{char}}"} 角色、{"{{earliest}}"} 起始时间、{"{{latest}}"} 结束时间、{"{{events}}"} 记录集合
+                                变量：{MEMORY_LONG_TERM_PROMPT_PLACEHOLDERS}
                             </span>
                         </div>
                         {!isDefault && (
@@ -1093,6 +1708,11 @@ export function MemoryBankPage({ view, selectedCharId, onSelectChar, onNotice }:
                             onChange={e => setEditingPrompt(e.target.value)}
                             className="ui-textarea w-full min-h-[200px] ts-14 leading-relaxed resize-y"
                         />
+                        {config.roomEnabled && !hasRoomSpecPlaceholder(currentPrompt) ? (
+                            <p className="mem-prompt-hint">
+                                这段提示词里没有 {"{{roomSpec}}"}：记忆宫殿开启时，房间规则会在结尾自动追加，所以仍然能正常分房间。
+                            </p>
+                        ) : null}
                         {isModified && (
                             <button
                                 onClick={handleSavePrompt}
@@ -1111,7 +1731,7 @@ export function MemoryBankPage({ view, selectedCharId, onSelectChar, onNotice }:
                         <div className="menu-label-group">
                             <span className="menu-label">核心记忆总结提示词</span>
                             <span className="menu-desc">
-                                变量：{"{{char}}"} 角色、{"{{earliest}}"} 起始时间、{"{{latest}}"} 结束时间、{"{{events}}"} 长期记忆集合
+                                变量：{MEMORY_CORE_PROMPT_PLACEHOLDERS}
                             </span>
                         </div>
                         {!isCoreDefault && (
@@ -1128,6 +1748,12 @@ export function MemoryBankPage({ view, selectedCharId, onSelectChar, onNotice }:
                             onChange={e => setEditingCorePrompt(e.target.value)}
                             className="ui-textarea w-full min-h-[200px] ts-14 leading-relaxed resize-y"
                         />
+                        {config.coreMemoryRoomFilterEnabled ? (
+                            <p className="mem-prompt-hint">
+                                已开启按房间过滤：{"{{rooms}}"} 会替换成来源房间说明，当前来源为
+                                「{MEMORY_ROOMS.filter(room => (config.coreMemoryRooms ?? []).includes(room)).map(room => MEMORY_ROOM_META[room].label).join("、")}」。
+                            </p>
+                        ) : null}
                         {isCoreModified && (
                             <button
                                 onClick={handleSaveCorePrompt}
