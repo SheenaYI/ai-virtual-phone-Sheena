@@ -98,7 +98,9 @@ export const UNFILED_ROOM_COLORS = { accent: "#9a9a9a", soft: "rgba(154,154,154,
 
 /** 房间预算滑块范围（UI 用） */
 export const ROOM_BUDGET_MIN = 0;
-export const ROOM_BUDGET_MAX = 3000;
+// 上限放宽到 30000：给「把某个房间当主力、其余房间基本不注入」的用法留足空间。
+// 全局 longTermTokenBudget 仍是最终硬护栏，单房间调大不会绕过它。
+export const ROOM_BUDGET_MAX = 30000;
 export const ROOM_BUDGET_STEP = 100;
 
 /** 未归档分组的显示名（room 为空的旧数据） */
