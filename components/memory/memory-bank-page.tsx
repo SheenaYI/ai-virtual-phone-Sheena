@@ -31,11 +31,14 @@ import {
 } from "@/lib/memory-storage";
 import {
     MEMORY_ROOMS,
+    MEMORY_ROOM_COLORS,
     MEMORY_ROOM_META,
+    UNFILED_ROOM_COLORS,
     UNFILED_ROOM_LABEL,
     ROOM_BUDGET_MAX,
     ROOM_BUDGET_MIN,
     ROOM_BUDGET_STEP,
+    normalizeMemoryTags,
 } from "@/lib/memory-room";
 import { reclassifyMemoryRooms } from "@/lib/memory-room-reclassify";
 import { estimateTokens } from "@/lib/token-counter";
@@ -116,6 +119,8 @@ type MemoryEditorState = {
     content: string;
     /** 记忆宫殿房间（可选）；新增时可由所在房间卡片预选 */
     room?: MemoryRoom;
+    /** #标签（可为空） */
+    tags?: string[];
 };
 
 /** 房间 chip 的筛选值：all = 全部，none = 未归档 */
@@ -233,6 +238,7 @@ export function MemoryBankPage({ view, selectedCharId, onSelectChar, onNotice }:
     const [reclassifying, setReclassifying] = useState(false);
     const [reclassifyProgress, setReclassifyProgress] = useState<string | null>(null);
     const [roomPromptEditing, setRoomPromptEditing] = useState<Partial<Record<MemoryRoom, string>>>({});
+    const [tagFilter, setTagFilter] = useState<string | null>(null);
     const [reclassifyScopeOpen, setReclassifyScopeOpen] = useState(false);
     const [roomPromptPickerOpen, setRoomPromptPickerOpen] = useState(false);
     const [activeRoomPrompt, setActiveRoomPrompt] = useState<MemoryRoom>("living");
@@ -644,6 +650,7 @@ export function MemoryBankPage({ view, selectedCharId, onSelectChar, onNotice }:
             entry,
             content: entry.content,
             ...(entry.room ? { room: entry.room } : {}),
+            ...(entry.tags?.length ? { tags: entry.tags } : {}),
         });
     };
 
@@ -699,6 +706,10 @@ export function MemoryBankPage({ view, selectedCharId, onSelectChar, onNotice }:
             // 显式写入/清除房间，避免旧房间在编辑后残留
             if (editorRoom) entry.room = editorRoom;
             else delete entry.room;
+            // #标签：只作用于长期记忆，同样显式写入/清除
+            const editorTags = type === "long_term" ? normalizeMemoryTags(memoryEditor.tags ?? []) : [];
+            if (editorTags.length > 0) entry.tags = editorTags;
+            else delete entry.tags;
 
             await saveMemoryEntry(entry);
             if (type === "core") {
@@ -810,63 +821,165 @@ export function MemoryBankPage({ view, selectedCharId, onSelectChar, onNotice }:
         </div>
     );
 
-    /** 记忆宫殿：长期记忆按房间分区展示（含未归档） */
-    const renderRoomsGroupedEntries = (entries: MemoryEntry[]) => {
-        const filtered = entries.filter(entry => {
-            if (roomFilter === "all") return true;
-            if (roomFilter === "none") return !entry.room;
-            return entry.room === roomFilter;
-        });
-        if (filtered.length === 0) {
-            return (
-                <div className="mem-empty-card">
-                    <p>这个分组下还没有记忆。</p>
-                    <button
-                        className="mem-empty-add-btn"
-                        onClick={() => openCreateMemoryEditor("long_term", roomFilter === "none" || roomFilter === "all" ? undefined : roomFilter)}
-                    >
-                        <Plus size={14} />
-                        <span>新增长期记忆</span>
-                    </button>
-                </div>
-            );
-        }
-        const groups: Array<{ room?: MemoryRoom; label: string }> = [
-            ...MEMORY_ROOMS.map(room => ({ room: room as MemoryRoom, label: MEMORY_ROOM_META[room].label })),
-            { room: undefined, label: UNFILED_ROOM_LABEL },
+    /** 记忆宫殿：六个房间的文件夹卡片墙（含未归档） */
+    const renderRoomFolders = (entries: MemoryEntry[]) => {
+        const cards: Array<{ room?: MemoryRoom; label: string; desc: string }> = [
+            ...MEMORY_ROOMS.map(room => ({
+                room: room as MemoryRoom,
+                label: MEMORY_ROOM_META[room].label,
+                desc: MEMORY_ROOM_META[room].desc,
+            })),
+            { room: undefined, label: UNFILED_ROOM_LABEL, desc: "还没有归类的记忆" },
         ];
         return (
-            <>
-                {groups.map(group => {
-                    const items = filtered.filter(entry => (group.room ? entry.room === group.room : !entry.room));
-                    if (items.length === 0) return null;
+            <div className="mem-folder-grid">
+                {cards.map(card => {
+                    const items = entries.filter(entry => (card.room ? entry.room === card.room : !entry.room));
+                    const palette = card.room ? MEMORY_ROOM_COLORS[card.room] : UNFILED_ROOM_COLORS;
                     const used = items.reduce((sum, entry) => sum + estimateTokens(entry.content) + 4, 0);
-                    const budget = group.room ? (config.roomBudgets?.[group.room] ?? 0) : 0;
-                    const over = group.room ? used > budget : false;
+                    const budget = card.room ? (config.roomBudgets?.[card.room] ?? 0) : 0;
+                    const over = card.room ? used > budget : false;
                     return (
-                        <div key={group.room ?? "unfiled"} className="mem-room-group">
-                            <div className="mem-room-group-head">
-                                <span className="mem-room-group-icon"><Home size={13} strokeWidth={1.8} /></span>
-                                <span className="mem-room-group-name">{group.label}</span>
-                                <span className="mem-room-group-stat">
-                                    {items.length} 条 · ~{used} tk
-                                    {group.room ? ` / 预算 ${budget}` : ""}
-                                </span>
-                                <button
-                                    className="mem-room-group-add"
-                                    onClick={() => openCreateMemoryEditor("long_term", group.room)}
-                                    title="在此房间新增记忆"
-                                >
-                                    <Plus size={14} />
-                                </button>
-                            </div>
-                            {over ? <p className="mem-room-group-warn">已超出该房间预算，注入时会被截断。</p> : null}
-                            {items.map(entry => renderEntryCard(entry))}
-                        </div>
+                        <button
+                            key={card.room ?? "unfiled"}
+                            type="button"
+                            className="mem-folder-card"
+                            style={{
+                                "--folder-accent": palette.accent,
+                                "--folder-soft": palette.soft,
+                            } as CSSProperties}
+                            onClick={() => {
+                                setRoomFilter(card.room ?? "none");
+                                setTagFilter(null);
+                            }}
+                        >
+                            <span className="mem-folder-tab" />
+                            <span className="mem-folder-icon"><FolderOpen size={20} strokeWidth={1.6} /></span>
+                            <span className="mem-folder-name">{card.label}</span>
+                            <span className="mem-folder-desc">{card.desc}</span>
+                            <span className="mem-folder-stat">
+                                {items.length} 条 · ~{used} tk
+                            </span>
+                            {over ? <span className="mem-folder-over">超出预算</span> : null}
+                        </button>
                     );
                 })}
-            </>
+            </div>
         );
+    };
+
+    /** 记忆宫殿：进入房间后的档案页（带 #标签 筛选） */
+    const renderRoomArchive = (entries: MemoryEntry[], room?: MemoryRoom) => {
+        const items = entries.filter(entry => (room ? entry.room === room : !entry.room));
+        const palette = room ? MEMORY_ROOM_COLORS[room] : UNFILED_ROOM_COLORS;
+        const label = room ? MEMORY_ROOM_META[room].label : UNFILED_ROOM_LABEL;
+        const used = items.reduce((sum, entry) => sum + estimateTokens(entry.content) + 4, 0);
+        const budget = room ? (config.roomBudgets?.[room] ?? 0) : 0;
+
+        const tagCounts = new Map<string, number>();
+        for (const entry of items) {
+            for (const tag of entry.tags ?? []) {
+                tagCounts.set(tag, (tagCounts.get(tag) ?? 0) + 1);
+            }
+        }
+        const tags = Array.from(tagCounts.entries()).sort((a, b) => b[1] - a[1]);
+        const visible = tagFilter
+            ? items.filter(entry => (entry.tags ?? []).some(tag => tag === tagFilter))
+            : items;
+        const sorted = [...visible].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+
+        return (
+            <div
+                className="mem-archive"
+                style={{ "--folder-accent": palette.accent, "--folder-soft": palette.soft } as CSSProperties}
+            >
+                <div className="mem-archive-head">
+                    <button
+                        type="button"
+                        className="mem-archive-back"
+                        onClick={() => { setRoomFilter("all"); setTagFilter(null); }}
+                    >
+                        <ChevronRight size={16} style={{ transform: "rotate(180deg)" }} />
+                        <span>房间</span>
+                    </button>
+                    <div className="mem-archive-title-group">
+                        <span className="mem-archive-title">{label}</span>
+                        <span className="mem-archive-sub">
+                            {items.length} 条档案 · ~{used} tk{room ? ` / 预算 ${budget}` : ""}
+                        </span>
+                    </div>
+                    <button
+                        type="button"
+                        className="mem-archive-add"
+                        onClick={() => openCreateMemoryEditor("long_term", room)}
+                        title="在此房间新增一条记忆"
+                    >
+                        <Plus size={16} />
+                    </button>
+                </div>
+
+                {room && used > budget ? (
+                    <p className="mem-room-group-warn">已超出该房间预算，注入时会被截断。</p>
+                ) : null}
+
+                {tags.length > 0 ? (
+                    <div className="mem-archive-tags">
+                        {tags.map(([tag, count]) => (
+                            <button
+                                key={tag}
+                                type="button"
+                                className={`mem-tag-chip${tagFilter === tag ? " is-active" : ""}`}
+                                onClick={() => setTagFilter(tagFilter === tag ? null : tag)}
+                            >
+                                #{tag}
+                                <span className="mem-tag-chip-count">{count}</span>
+                            </button>
+                        ))}
+                    </div>
+                ) : null}
+
+                {sorted.length === 0 ? (
+                    <div className="mem-empty-card">
+                        <p>{tagFilter ? `没有带 #${tagFilter} 的档案。` : "这个房间还没有档案。"}</p>
+                        <button
+                            className="mem-empty-add-btn"
+                            onClick={() => openCreateMemoryEditor("long_term", room)}
+                        >
+                            <Plus size={14} />
+                            <span>新增长期记忆</span>
+                        </button>
+                    </div>
+                ) : (
+                    <div className="mem-archive-list">
+                        {sorted.map(entry => (
+                            <div key={entry.id} className="mem-archive-item">
+                                {renderEntryCard(entry)}
+                                {(entry.tags ?? []).length > 0 ? (
+                                    <div className="mem-archive-item-tags">
+                                        {(entry.tags ?? []).map(tag => (
+                                            <button
+                                                key={tag}
+                                                type="button"
+                                                className="mem-tag-chip is-small"
+                                                onClick={() => setTagFilter(tag)}
+                                            >
+                                                #{tag}
+                                            </button>
+                                        ))}
+                                    </div>
+                                ) : null}
+                            </div>
+                        ))}
+                    </div>
+                )}
+            </div>
+        );
+    };
+
+    /** 记忆宫殿：文件夹墙 或 房间档案页 */
+    const renderRoomsGroupedEntries = (entries: MemoryEntry[]) => {
+        if (roomFilter === "all") return renderRoomFolders(entries);
+        return renderRoomArchive(entries, roomFilter === "none" ? undefined : roomFilter);
     };
 
     const renderMemoryEntries = (type: MemoryEntry["type"], entries: MemoryEntry[], emptyText: string) => {
@@ -892,7 +1005,7 @@ export function MemoryBankPage({ view, selectedCharId, onSelectChar, onNotice }:
                         </button>
                     </div>
                 )}
-                {roomMode ? (
+                {roomMode && roomFilter !== "all" ? (
                     <div className="mem-room-chips">
                         <button
                             className="ui-chip"
@@ -1010,6 +1123,7 @@ export function MemoryBankPage({ view, selectedCharId, onSelectChar, onNotice }:
                                 setActiveTab(tab.key);
                                 setEntryMenuId(null);
                                 setRoomFilter("all");
+                                setTagFilter(null);
                             }}
                         >
                             <tab.icon size={18} />
@@ -1056,6 +1170,28 @@ export function MemoryBankPage({ view, selectedCharId, onSelectChar, onNotice }:
                                         disabled={savingMemory}
                                         onChange={event => setMemoryEditor(prev => prev ? { ...prev, content: event.target.value } : prev)}
                                     />
+                                    {!isCore ? (
+                                        <div className="mem-edit-rooms">
+                                            <p className="mem-edit-rooms-title">标签（用空格或逗号分隔，会自动补 #）</p>
+                                            <input
+                                                type="text"
+                                                className="mem-edit-tags-input"
+                                                placeholder="例如：日常 约定 生日"
+                                                value={(memoryEditor.tags ?? []).map(tag => `#${tag}`).join(" ")}
+                                                disabled={savingMemory}
+                                                onChange={event => setMemoryEditor(prev => prev
+                                                    ? { ...prev, tags: normalizeMemoryTags(event.target.value) }
+                                                    : prev)}
+                                            />
+                                            {(memoryEditor.tags ?? []).length > 0 ? (
+                                                <div className="mem-archive-tags">
+                                                    {(memoryEditor.tags ?? []).map(tag => (
+                                                        <span key={tag} className="mem-tag-chip is-small">#{tag}</span>
+                                                    ))}
+                                                </div>
+                                            ) : null}
+                                        </div>
+                                    ) : null}
                                     {!isCore && config.roomEnabled ? (
                                         <div className="mem-edit-rooms">
                                             <p className="mem-edit-rooms-title">存放房间</p>
@@ -1189,6 +1325,25 @@ export function MemoryBankPage({ view, selectedCharId, onSelectChar, onNotice }:
                                     </button>
                                 </div>
                             </div>
+                            {config.roomEnabled ? (
+                                <div className="menu-item">
+                                    <MemorySettingsIcon icon={Wand2} color={BINDING_ACCENTS.memory} />
+                                    <div className="menu-label-group">
+                                        <span className="menu-label">按正文重新归档</span>
+                                        <span className="menu-desc">读取已有记忆正文，让 AI 重新判定房间与标签（不改写正文）</span>
+                                    </div>
+                                    <div className="menu-right">
+                                        <button
+                                            className="ui-btn ui-btn-outline py-1 px-3 ts-12"
+                                            onClick={() => setReclassifyScopeOpen(true)}
+                                            disabled={reclassifying}
+                                        >
+                                            <Wand2 size={12} className="mr-1" />
+                                            {reclassifying ? "处理中..." : "归档"}
+                                        </button>
+                                    </div>
+                                </div>
+                            ) : null}
                         </div>
 
                         {summarizeRangeOpen ? (

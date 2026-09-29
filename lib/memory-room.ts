@@ -83,6 +83,19 @@ export const MEMORY_ROOM_META: Record<MemoryRoom, MemoryRoomMeta> = {
     },
 };
 
+/** 房间配色（UI 用）：accent 用于标题/图标，soft 用于卡片底色 */
+export const MEMORY_ROOM_COLORS: Record<MemoryRoom, { accent: string; soft: string }> = {
+    living: { accent: "#8fb8d8", soft: "rgba(143,184,216,0.14)" },
+    bedroom: { accent: "#c9a3d8", soft: "rgba(201,163,216,0.14)" },
+    collection: { accent: "#dcc07f", soft: "rgba(220,192,127,0.14)" },
+    self: { accent: "#87cbb4", soft: "rgba(135,203,180,0.14)" },
+    study: { accent: "#9fb6dd", soft: "rgba(159,182,221,0.14)" },
+    windowsill: { accent: "#e8ae9a", soft: "rgba(232,174,154,0.14)" },
+};
+
+/** 未归档分组的配色（与房间区分开） */
+export const UNFILED_ROOM_COLORS = { accent: "#9a9a9a", soft: "rgba(154,154,154,0.12)" };
+
 /** 房间预算滑块范围（UI 用） */
 export const ROOM_BUDGET_MIN = 0;
 export const ROOM_BUDGET_MAX = 3000;
@@ -230,8 +243,61 @@ export function buildRoomSpecText(config: MemoryConfig | null | undefined): stri
     lines.push("- 角色对自己的认知、性格演变、潜意识与内心矛盾一律归入 [自我房间]");
     lines.push("- 期盼、目标、憧憬、尚未完成的约定一律归入 [窗台]");
     lines.push("- 每个房间 60-150 字；确实没有可写内容就整个省略该房间，不要硬凑");
-    lines.push("- 房间标题之外的正文不要加任何格式标记");
+    lines.push(`- 每个房间正文之后另起一行，输出 ${MEMORY_TAG_MAX} 个以内的标签，形如：#标签1 #标签2（标签是 2-6 字的短词，用于日后检索，不要带标点）`);
+    lines.push("- 标签行必须是该房间内容的最后一行；除房间标题和标签行外，正文不要加任何格式标记");
     return lines.join("\n");
+}
+
+/** 每个房间最多保留的标签数 */
+export const MEMORY_TAG_MAX = 4;
+
+/** 归一化标签：去掉 # 与前缀空白、限长、去重、限量。 */
+export function normalizeMemoryTags(value: unknown, limit: number = MEMORY_TAG_MAX): string[] {
+    const rawList: string[] = Array.isArray(value)
+        ? value.map(item => String(item ?? ""))
+        : String(value ?? "").split(/[\s,，、]+/);
+    const result: string[] = [];
+    const seen = new Set<string>();
+    for (const raw of rawList) {
+        const tag = raw.replace(/^[#＃\s]+/, "").replace(/[。，,；;：:！!？?]+$/g, "").trim();
+        if (!tag || tag.length > 12) continue;
+        const key = tag.toLowerCase();
+        if (seen.has(key)) continue;
+        seen.add(key);
+        result.push(tag);
+        if (result.length >= limit) break;
+    }
+    return result;
+}
+
+/** 一行是否整体是标签行（#甲 #乙 / ＃甲）。 */
+function isTagOnlyLine(line: string): boolean {
+    const trimmed = line.trim();
+    if (!trimmed || !/^[#＃]/.test(trimmed)) return false;
+    const tokens = trimmed.split(/\s+/);
+    return tokens.every(token => /^[#＃]\S+$/.test(token));
+}
+
+/**
+ * 从一段房间正文里抽出标签行。
+ * 只认「整行都是 #标签」的行，避免把含 # 的正常句子误判成标签。
+ */
+export function extractMemoryTags(content: string): { content: string; tags: string[] } {
+    const lines = String(content ?? "").replace(/\r\n?/g, "\n").split("\n");
+    const tagLines: string[] = [];
+    const bodyLines: string[] = [];
+    for (const line of lines) {
+        if (isTagOnlyLine(line)) {
+            tagLines.push(line);
+            continue;
+        }
+        bodyLines.push(line);
+    }
+    const tags = normalizeMemoryTags(tagLines.join(" "));
+    return {
+        content: bodyLines.join("\n").replace(/\n{3,}/g, "\n\n").trim(),
+        tags,
+    };
 }
 
 /**

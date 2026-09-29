@@ -12,13 +12,14 @@ import {
 import {
     MEMORY_ROOMS,
     normalizeMemoryRoom,
+    normalizeMemoryTags,
     normalizeRoomBudgets,
     normalizeRoomFlags,
     normalizeRoomList,
     normalizeRoomPrompts,
 } from "./memory-room";
 import { kvGet, kvSet, registerKvMigration, registerDynamicPrefix } from "./kv-db";
-import { openIndexedDbAtLeast, IdbBlockedError } from "./idb-open";
+import { openIndexedDbAtLeast } from "./idb-open";
 
 // ── Long-term memory DB (unchanged from v1) ──
 
@@ -65,16 +66,7 @@ async function openDb(): Promise<IDBDatabase | null> {
             store = tx!.objectStore(STORE_NAME);
         }
         ensureMemoryIndexes(store);
-    }).catch((err: unknown) => {
-        // 区分「打不开」和「没有数据」：升级被其它页面阻塞时数据其实完好，
-        // 静默返回 null 会让上层显示成空记忆库（用户曾误以为数据被清空）。
-        if (err instanceof IdbBlockedError) {
-            console.warn("[memory-storage] 记忆数据库版本升级被阻塞，本次读取已跳过（数据未丢失，关闭其它已打开的页面后重试即可）。");
-        } else {
-            console.warn("[memory-storage] 打开记忆数据库失败：", err);
-        }
-        return null;
-    });
+    }).catch(() => null);
 }
 
 function runRequest<T>(req: IDBRequest<T>): Promise<T> {
@@ -176,6 +168,8 @@ export type MemoryEntryPatch = {
     /** null = 清空（回到未归档） */
     room?: MemoryRoom | null;
     pinned?: boolean;
+    /** 空数组/null = 清空标签 */
+    tags?: string[] | null;
 };
 
 /** 局部更新一条记忆的房间/置顶。正文、embedding、metadata 原样保留。 */
@@ -191,6 +185,11 @@ export async function patchMemoryEntry(id: string, patch: MemoryEntryPatch): Pro
     if ("pinned" in patch) {
         if (patch.pinned) next.pinned = true;
         else delete next.pinned;
+    }
+    if ("tags" in patch) {
+        const tags = normalizeMemoryTags(patch.tags ?? []);
+        if (tags.length > 0) next.tags = tags;
+        else delete next.tags;
     }
     await saveMemoryEntry(next);
     return next;

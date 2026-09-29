@@ -8,7 +8,7 @@ import type { MemoryConfig, MemoryEntry, MemoryRoom } from "./memory-types";
 import { loadMemoryEntriesByType, patchMemoryEntries } from "./memory-storage";
 import { resolveAuxiliaryApiConfig } from "./settings-storage";
 import { simpleLLMCall } from "./api-helpers";
-import { MEMORY_ROOMS, MEMORY_ROOM_META, normalizeMemoryRoom } from "./memory-room";
+import { MEMORY_ROOMS, MEMORY_ROOM_META, normalizeMemoryRoom, normalizeMemoryTags } from "./memory-room";
 
 /** 每批处理的条数（上限，避免单次请求过大） */
 export const RECLASSIFY_BATCH_SIZE = 20;
@@ -34,6 +34,14 @@ export type ReclassifyResult = {
     total: number;
 };
 
+/** 标签集合是否等价（忽略顺序与大小写）。 */
+function sameTags(a: string[], b: string[] | undefined): boolean {
+    const left = [...a].map(tag => tag.toLowerCase()).sort();
+    const right = [...(b ?? [])].map(tag => tag.toLowerCase()).sort();
+    if (left.length !== right.length) return false;
+    return left.every((tag, index) => tag === right[index]);
+}
+
 function isManualMemoryEntry(entry: MemoryEntry): boolean {
     const origin = String(entry.metadata?.origin ?? "");
     return origin === "user_manual" || origin === "user_edited" || entry.id.includes("_manual_");
@@ -57,14 +65,16 @@ function buildReclassifyPrompt(characterName: string, batch: MemoryEntry[]): str
     lines.push("【要求】");
     lines.push("- 每条只选一个房间，用房间的英文 id（living/bedroom/collection/self/study/windowsill）");
     lines.push("- 无法判断的条目，room 留空字符串");
+    lines.push("- 同时为每条补 4 个以内的标签：2-6 字的短词，用于日后检索（tags 数组）；无法提炼就给空数组");
+    lines.push("- 只做归类，不要改写记忆正文");
     lines.push("- 严格只输出 JSON 数组，不要输出解释、不要加代码块标记");
     lines.push("");
     lines.push("【输出格式】");
-    lines.push('[{"id":"记忆id","room":"living"},{"id":"记忆id2","room":""}]');
+    lines.push('[{"id":"记忆id","room":"living","tags":["日常","约定"]},{"id":"记忆id2","room":"","tags":[]}]');
     return lines.join("\n");
 }
 
-type RoomAssignment = { id: string; room?: MemoryRoom };
+type RoomAssignment = { id: string; room?: MemoryRoom; tags?: string[] };
 
 /** 尽力从模型输出里解析出 id → 房间 的映射（兼容 JSON 与朴素行格式）。 */
 function parseAssignments(raw: string): RoomAssignment[] {
@@ -84,7 +94,12 @@ function parseAssignments(raw: string): RoomAssignment[] {
                 const record = item as Record<string, unknown>;
                 const id = String(record.id ?? record.memoryId ?? "").trim();
                 if (!id) continue;
-                result.push({ id, room: normalizeMemoryRoom(record.room ?? record.roomId) });
+                const tags = normalizeMemoryTags(record.tags);
+                result.push({
+                    id,
+                    room: normalizeMemoryRoom(record.room ?? record.roomId),
+                    ...(tags.length > 0 ? { tags } : {}),
+                });
             }
             return result;
         }
@@ -194,23 +209,30 @@ export async function reclassifyMemoryRooms(
             assignments = [];
         }
 
-        const roomById = new Map<string, MemoryRoom>();
+        const assignmentById = new Map<string, RoomAssignment>();
         for (const item of assignments) {
-            if (item.room) roomById.set(item.id, item.room);
+            if (item.room || item.tags) assignmentById.set(item.id, item);
         }
 
-        const patches: Array<{ id: string; room: MemoryRoom }> = [];
+        // 房间与标签都只在真的变化时才写回；正文永不改动
+        const patches: Array<{ id: string; room?: MemoryRoom; tags?: string[] }> = [];
         for (const entry of batch) {
-            const room = roomById.get(entry.id);
-            if (!room) {
+            const assignment = assignmentById.get(entry.id);
+            if (!assignment) {
                 skipped += 1;
                 continue;
             }
-            if (entry.room === room) {
+            const nextRoom = assignment.room && assignment.room !== entry.room ? assignment.room : undefined;
+            const nextTags = assignment.tags && !sameTags(assignment.tags, entry.tags) ? assignment.tags : undefined;
+            if (!nextRoom && !nextTags) {
                 skipped += 1;
                 continue;
             }
-            patches.push({ id: entry.id, room });
+            patches.push({
+                id: entry.id,
+                ...(nextRoom ? { room: nextRoom } : {}),
+                ...(nextTags ? { tags: nextTags } : {}),
+            });
         }
 
         if (patches.length > 0) {

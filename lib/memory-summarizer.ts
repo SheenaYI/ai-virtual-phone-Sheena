@@ -23,7 +23,7 @@ import { loadNativeTimeline, formatTimelineForSummarization, filterTimelineByAll
 import { generateEmbedding, resolveEmbeddingModel } from "./memory-embedding";
 import { simpleLLMCall } from "./api-helpers";
 import { maybeRunCoreMemoryPipeline } from "./core-memory-builder";
-import { buildRoomSpecText, parseRoomSections, ROOM_ENTRY_LIMIT_MULTIPLIER } from "./memory-room";
+import { buildRoomSpecText, extractMemoryTags, parseRoomSections, ROOM_ENTRY_LIMIT_MULTIPLIER } from "./memory-room";
 
 /** Per-character lock to prevent concurrent summarization. */
 const summarizingSet = new Set<string>();
@@ -198,20 +198,24 @@ export async function runSummarizationPipeline(
 
     const savedEntries: MemoryEntry[] = [];
     for (const section of usable) {
+        // 标签行从正文里剥出来单独存，#标签 不参与注入，只用于档案页筛选
+        const { content: sectionContent, tags } = extractMemoryTags(section.content);
+        if (!sectionContent) continue;
         const sectionEmbedding = usable.length === 1
             ? embedding
-            : await buildSectionEmbedding(section.content, config);
+            : await buildSectionEmbedding(sectionContent, config);
         const entry: MemoryEntry = {
             id: `mem_lt_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
             characterId,
             sourceApp: dominantSource as MemoryEntry["sourceApp"],
             type: "long_term",
-            content: section.content,
+            content: sectionContent,
             embedding: sectionEmbedding,
             importance: 0.8,
             createdAt: now,
             updatedAt: now,
             ...(section.room ? { room: section.room } : {}),
+            ...(tags.length > 0 ? { tags } : {}),
             metadata: { ...sharedMetadata },
         };
         await saveMemoryEntry(entry);

@@ -191,3 +191,224 @@
     padding-left: 26px;
     opacity: 0.9;
 }
+
+/* ══ 记忆宫殿：房间文件夹卡片墙 ══ */
+.mem-folder-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px;
+    padding: 4px 2px 8px;
+}
+
+.mem-folder-card {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    min-height: 108px;
+    padding: 16px 12px 12px;
+    border: 1px solid color-mix(in srgb, var(--folder-accent) 40%, transparent);
+    border-radius: 14px;
+    background:
+        linear-gradient(180deg, color-mix(in srgb, var(--folder-accent) 24%, transparent), var(--folder-soft));
+    color: inherit;
+    text-align: left;
+    cursor: pointer;
+    overflow: hidden;
+    backdrop-filter: blur(6px);
+    transition: transform 0.16s ease, box-shadow 0.16s ease;
+}
+
+.mem-folder-card:active {
+    transform: scale(0.975);
+}
+
+/* 文件夹标签页（顶部小凸起） */
+.mem-folder-tab {
+    position: absolute;
+    top: 0;
+    left: 14px;
+    width: 42px;
+    height: 10px;
+    border-bottom-left-radius: 8px;
+    border-bottom-right-radius: 8px;
+    background: color-mix(in srgb, var(--folder-accent) 42%, transparent);
+}
+
+.mem-folder-icon {
+    display: inline-flex;
+    align-items: center;
+    color: var(--folder-accent);
+}
+
+.mem-folder-name {
+    font-size: 14px;
+    font-weight: 600;
+    letter-spacing: 0.6px;
+}
+
+.mem-folder-desc {
+    font-size: 11px;
+    line-height: 1.5;
+    opacity: 0.72;
+}
+
+.mem-folder-stat {
+    margin-top: auto;
+    font-size: 11px;
+    opacity: 0.6;
+}
+
+.mem-folder-over {
+    align-self: flex-start;
+    margin-top: 2px;
+    padding: 1px 6px;
+    border-radius: 999px;
+    background: rgba(224, 167, 94, 0.18);
+    font-size: 10px;
+    color: #e0a75e;
+}
+
+/* ══ 记忆宫殿：房间档案页 ══ */
+.mem-archive {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 2px 2px 10px;
+}
+
+.mem-archive-head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 8px;
+    border-radius: 12px;
+    background: var(--folder-soft);
+    border: 1px solid color-mix(in srgb, var(--folder-accent) 26%, transparent);
+}
+
+.mem-archive-back {
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+    padding: 4px 6px;
+    border: none;
+    border-radius: 8px;
+    background: transparent;
+    color: var(--folder-accent);
+    font-size: 12px;
+    cursor: pointer;
+}
+
+.mem-archive-title-group {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+}
+
+.mem-archive-title {
+    font-size: 15px;
+    font-weight: 600;
+    letter-spacing: 0.8px;
+    color: var(--folder-accent);
+}
+
+.mem-archive-sub {
+    font-size: 11px;
+    opacity: 0.65;
+}
+
+.mem-archive-add {
+    margin-left: auto;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 28px;
+    height: 28px;
+    border: 1px solid color-mix(in srgb, var(--folder-accent) 40%, transparent);
+    border-radius: 50%;
+    background: transparent;
+    color: var(--folder-accent);
+    cursor: pointer;
+}
+
+.mem-archive-tags {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    padding: 0 4px;
+}
+
+.mem-tag-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 3px 9px;
+    border: 1px solid color-mix(in srgb, var(--folder-accent) 34%, transparent);
+    border-radius: 999px;
+    background: transparent;
+    color: inherit;
+    font-size: 11px;
+    line-height: 1.6;
+    cursor: pointer;
+    opacity: 0.85;
+}
+
+.mem-tag-chip.is-small {
+    padding: 1px 7px;
+    font-size: 10px;
+    opacity: 0.7;
+}
+
+.mem-tag-chip.is-active {
+    background: color-mix(in srgb, var(--folder-accent) 22%, transparent);
+    border-color: var(--folder-accent);
+    opacity: 1;
+}
+
+.mem-tag-chip-count {
+    font-size: 10px;
+    opacity: 0.6;
+}
+
+.mem-archive-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+/* 档案条目：左侧色条 + 标签行 */
+.mem-archive-item {
+    position: relative;
+    padding-left: 8px;
+    border-left: 2px solid color-mix(in srgb, var(--folder-accent) 45%, transparent);
+    border-radius: 2px;
+}
+
+.mem-archive-item-tags {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    padding: 4px 2px 0;
+}
+
+/* ── 编辑弹窗里的标签输入 ── */
+.mem-edit-tags-input {
+    width: 100%;
+    padding: 8px 10px;
+    border: 1px solid rgba(255, 255, 255, 0.16);
+    border-radius: 10px;
+    background: rgba(255, 255, 255, 0.04);
+    color: inherit;
+    font-size: 13px;
+    line-height: 1.6;
+    outline: none;
+}
+
+.mem-edit-tags-input:focus {
+    border-color: var(--color-accent, rgba(255, 255, 255, 0.4));
+}
+
+.mem-edit-tags-input::placeholder {
+    opacity: 0.45;
+}
