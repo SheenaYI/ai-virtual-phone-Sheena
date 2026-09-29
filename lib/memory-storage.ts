@@ -18,7 +18,7 @@ import {
     normalizeRoomPrompts,
 } from "./memory-room";
 import { kvGet, kvSet, registerKvMigration, registerDynamicPrefix } from "./kv-db";
-import { openIndexedDbAtLeast } from "./idb-open";
+import { openIndexedDbAtLeast, IdbBlockedError } from "./idb-open";
 
 // ── Long-term memory DB (unchanged from v1) ──
 
@@ -65,7 +65,16 @@ async function openDb(): Promise<IDBDatabase | null> {
             store = tx!.objectStore(STORE_NAME);
         }
         ensureMemoryIndexes(store);
-    }).catch(() => null);
+    }).catch((err: unknown) => {
+        // 区分「打不开」和「没有数据」：升级被其它页面阻塞时数据其实完好，
+        // 静默返回 null 会让上层显示成空记忆库（用户曾误以为数据被清空）。
+        if (err instanceof IdbBlockedError) {
+            console.warn("[memory-storage] 记忆数据库版本升级被阻塞，本次读取已跳过（数据未丢失，关闭其它已打开的页面后重试即可）。");
+        } else {
+            console.warn("[memory-storage] 打开记忆数据库失败：", err);
+        }
+        return null;
+    });
 }
 
 function runRequest<T>(req: IDBRequest<T>): Promise<T> {
